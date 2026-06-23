@@ -348,6 +348,16 @@ out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "- \`impl Marker\` for:" "--changelog: a trait on multiple types is grouped by trait"
 rm -rf "$repo"
 
+# 6p) A *removed* trait-impl method groups under its `impl Trait for Self` header,
+#     using the base-ref trait map (the impl is gone at head, so the head map
+#     can't attribute it).
+repo=$(new_repo $'pub trait T { fn m(&self); }\npub struct S;\nimpl T for S { fn m(&self) {} }')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" $'pub trait T { fn m(&self); }\npub struct S;' 'remove impl T for S')
+out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+assert_contains "$out" "- \`impl T for S\`:" "--changelog: removed impl method grouped under its impl (base map)"
+rm -rf "$repo"
+
 # 6k) A `const fn` must keep its name, not collapse to a stray `fn` group (the
 #     keyword strip has to consume the `const`/`async`/`unsafe` qualifier *and*
 #     the `fn`).

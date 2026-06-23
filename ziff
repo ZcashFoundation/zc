@@ -2105,8 +2105,9 @@ END {
     if (mode == "changed") {
         for (i = 1; i <= n; i++) {
             line = buf[i]
-            if (line ~ /^  - /) { sub(/^  - /, "", line); pend = relsig(line); continue }
+            if (line ~ /^  - /) { skip = (line ~ /proptest::/); sub(/^  - /, "", line); pend = relsig(line); continue }
             if (line ~ /^  \+ /) {
+                if (skip) { skip = 0; continue }        # proptest Arbitrary machinery (test-only)
                 sub(/^  \+ /, "", line); nw = relsig(line)
                 if ((pend SUBSEP nw) in seenpair) continue
                 seenpair[pend SUBSEP nw] = 1
@@ -2118,6 +2119,7 @@ END {
         for (i = 1; i <= n; i++) {
             s = buf[i]
             if (s ~ /^impl / && s !~ / for /) continue  # inherent impl block header, not an item
+            if (s ~ /proptest::/) continue              # proptest Arbitrary machinery (test-only)
             gk0 = group_key(s); qp = qual_path(s)
             if ((gk0 SUBSEP qp) in seenitem) continue   # cargo-public-api dupes some impls
             seenitem[gk0 SUBSEP qp] = 1
@@ -2320,21 +2322,32 @@ if $changelog_mode; then
     # under `impl Trait for Self` instead of their bare Self type. Built only for
     # crates that have API changes; degrades silently to plain grouping without a
     # nightly toolchain or if rustdoc JSON fails.
-    declare -A trait_file=()
+    # `trait_file` is the head map (for Added). Removed items need the *base* map
+    # (their impls are gone at head), so `trait_file_base` is built for crates with
+    # removals, letting a removed `impl Error for T`'s `source`/`fmt` group under
+    # the impl rather than under the bare type.
+    declare -A trait_file=() trait_file_base=()
     [ -z "${nightly_toolchain:-}" ] && nightly_toolchain=$(rustup toolchain list 2>/dev/null | grep -oE 'nightly[^ ]*' | head -n1 || true)
     if [ -n "${nightly_toolchain:-}" ]; then
-        changed_crates=()
+        changed_crates=() removed_crates=()
         for i in "${!crate_names[@]}"; do
             [ $(( ${crate_removed[$i]} + ${crate_changed[$i]} + ${crate_added[$i]} )) -gt 0 ] &&
                 changed_crates+=("${crate_names[$i]}")
+            [ "${crate_removed[$i]}" -gt 0 ] && removed_crates+=("${crate_names[$i]}")
         done
         if [ ${#changed_crates[@]} -gt 0 ]; then
             progress_start
             dump_trait_map "$head_sha" "${changed_crates[@]}" >/dev/null 2>/dev/null || true
+            [ ${#removed_crates[@]} -gt 0 ] &&
+                { dump_trait_map "$baseline_sha" "${removed_crates[@]}" >/dev/null 2>/dev/null || true; }
             progress_clear
             for crate in "${changed_crates[@]}"; do
                 cf="$CACHE_DIR/${head_sha}.${SCRIPT_HASH}.${crate}.traitmap.tsv"
                 [ -s "$cf" ] && trait_file["$crate"]="$cf"
+            done
+            for crate in "${removed_crates[@]}"; do
+                cfb="$CACHE_DIR/${baseline_sha}.${SCRIPT_HASH}.${crate}.traitmap.tsv"
+                [ -s "$cfb" ] && trait_file_base["$crate"]="$cfb"
             done
         fi
     fi
@@ -2344,25 +2357,31 @@ if $changelog_mode; then
             name="${crate_names[$i]}"
             r="${crate_removed[$i]}" c="${crate_changed[$i]}" a="${crate_added[$i]}"
             dc="${dep_changed_md[$name]:-}" dr="${dep_removed_md[$name]:-}"
-            tf="${trait_file[$name]:-}"
-            [ $((r + c + a)) -eq 0 ] && [ -z "$dc" ] && [ -z "$dr" ] && continue
+            tf="${trait_file[$name]:-}" tfb="${trait_file_base[$name]:-}"
             pfx="${name//-/_}"
+            # Render first, then emit only the sections that have content — items
+            # can be filtered out (e.g. proptest machinery), leaving a section empty.
+            added_md=""; changed_md=""; removed_md=""
+            [ "$a" -gt 0 ] && added_md=$(render_changelog "${crate_added_lines[$i]}" added "$pfx" "$tf")
+            [ "$c" -gt 0 ] && changed_md=$(render_changelog "${crate_changed_lines[$i]}" changed "$pfx" "$tf")
+            [ "$r" -gt 0 ] && removed_md=$(render_changelog "${crate_removed_lines[$i]}" removed "$pfx" "$tfb")
+            [ -z "$added_md$changed_md$removed_md$dc$dr" ] && continue
             echo "## ${name}"
             echo ""
-            if [ "$a" -gt 0 ]; then
+            if [ -n "$added_md" ]; then
                 echo "### Added"
-                render_changelog "${crate_added_lines[$i]}" added "$pfx" "$tf"
+                printf '%s\n' "$added_md"
                 echo ""
             fi
-            if [ "$c" -gt 0 ] || [ -n "$dc" ]; then
+            if [ -n "$changed_md" ] || [ -n "$dc" ]; then
                 echo "### Changed"
                 [ -n "$dc" ] && printf '%s' "$dc"
-                [ "$c" -gt 0 ] && render_changelog "${crate_changed_lines[$i]}" changed "$pfx" "$tf"
+                [ -n "$changed_md" ] && printf '%s\n' "$changed_md"
                 echo ""
             fi
-            if [ "$r" -gt 0 ] || [ -n "$dr" ]; then
+            if [ -n "$removed_md" ] || [ -n "$dr" ]; then
                 echo "### Removed"
-                [ "$r" -gt 0 ] && render_changelog "${crate_removed_lines[$i]}" removed "$pfx" "$tf"
+                [ -n "$removed_md" ] && printf '%s\n' "$removed_md"
                 [ -n "$dr" ] && printf '%s' "$dr"
                 echo ""
             fi
