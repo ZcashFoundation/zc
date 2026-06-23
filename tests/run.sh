@@ -243,7 +243,7 @@ head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Widget;\nimpl Wi
 out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "## ziff_fixture" "--changelog: per-crate heading"
 assert_contains "$out" "### Added" "--changelog: Added section"
-assert_contains "$out" "- \`ziff_fixture::Widget\`:" "--changelog: type group header (full crate-qualified path)"
+assert_contains "$out" "- \`Widget\`:" "--changelog: type group header (crate-relative)"
 assert_contains "$out" "- \`new\`" "--changelog: member shown as a bare name"
 rm -rf "$repo"
 
@@ -311,7 +311,7 @@ repo=$(new_repo $'pub trait IntoDisk { type Bytes; }\npub struct Foo<T>(pub T);\
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub trait IntoDisk { type Bytes; }\npub struct Foo<T>(pub T);\nimpl IntoDisk for Foo<u32> { type Bytes = [u8; 48]; }' 'bump Bytes')
 out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
-assert_contains "$out" "- \`impl IntoDisk for ziff_fixture::Foo<u32>\`:" "--changelog: assoc item grouped under impl header with Self generics"
+assert_contains "$out" "- \`impl IntoDisk for Foo<u32>\`:" "--changelog: assoc item grouped under impl header with Self generics"
 assert_contains "$out" "- \`Bytes\`" "--changelog: assoc type shown as a bare member under the impl"
 rm -rf "$repo"
 
@@ -335,7 +335,7 @@ repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\n#[derive(Hash)]\npub struct K(pub u8);' 'derive Hash')
 out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
-assert_contains "$out" "impl Hash for ziff_fixture::K" "--changelog: -ss surfaces auto-derived impls"
+assert_contains "$out" "impl Hash for K" "--changelog: -ss surfaces auto-derived impls"
 rm -rf "$repo"
 
 echo ""
