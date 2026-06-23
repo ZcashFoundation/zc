@@ -76,9 +76,12 @@ Run `ziff --help` for the full option and output reference.
 changelog (markdown) instead of the diff: one `## <crate>` section per changed
 crate, with `### Added` / `### Changed` / `### Removed` lists.
 
-- API items are grouped under their owning type, with own-crate paths made
-  crate-relative (e.g. `error::TransactionError`) and foreign-type paths kept in
-  full.
+- Added/removed API items are grouped under their owning type, with own-crate
+  paths made crate-relative (e.g. `error::TransactionError`) and foreign-type
+  paths kept in full.
+- Changed items show the old → new signature, so the entry says *what* changed
+  (e.g. a return type going from `Result<Self, E>` to `Self`) rather than just
+  naming the item.
 - Trait-impl associated items are grouped under an `impl <Trait> for <Self>`
   header. The trait is recovered from the crate's rustdoc JSON (so even a
   *changed* associated type like `ValueBalance::Bytes`, whose `impl` line is

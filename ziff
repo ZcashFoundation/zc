@@ -2054,6 +2054,15 @@ function member_disp(qp, gk) {
     if (index(qp, gk "::") == 1) return substr(qp, length(gk) + 3)
     return disp(qp)
 }
+# A full signature, cleaned for display in the Changed section: drop the leading
+# attribute and `pub`, and make own-crate paths relative. Keeps params/return/
+# value so the old -> new pair shows exactly what changed.
+function relsig(s) {
+    gsub(/^#\[[^]]*\] +/, "", s)
+    sub(/^pub +/, "", s)
+    if (crate_prefix != "") gsub(crate_prefix "::", "", s)
+    return s
+}
 # Impl-group key "impl <Trait> for <Self>" for item s, or "" if s is not a
 # trait-impl member/header. Sets G_ISHEADER=1 when s is the impl line itself.
 function impl_group(s, gk0, qp,   body, tp, sp, ts, mem, tr) {
@@ -2083,28 +2092,44 @@ BEGIN {
 /^[[:space:]]*$/ { next }
 { buf[++n] = $0 }
 END {
-    for (i = 1; i <= n; i++) {
-        s = buf[i]
-        if (mode == "changed") { if (s !~ /^  - /) continue; sub(/^  - /, "", s) }
-        gk0 = group_key(s); qp = qual_path(s)
-        if ((gk0 SUBSEP qp) in seenitem) continue   # cargo-public-api dupes some impls
-        seenitem[gk0 SUBSEP qp] = 1
-        ig = impl_group(s, gk0, qp)
-        if (ig != "") { gk = ig; isimpl[gk] = 1 } else { gk = gk0 }
-        if (!(gk in seen)) { seen[gk] = 1; order[++norder] = gk }
-        if (ig != "" && G_ISHEADER) { hdrtext[gk] = G_HDRTEXT; continue }  # impl line: header only
-        if (ig != "") members[gk, ++mcnt[gk]] = last_seg(qp)       # impl member: leaf name
-        else members[gk, ++mcnt[gk]] = qp                          # type member: full path
-    }
-    for (o = 1; o <= norder; o++) {
-        gk = order[o]
-        nd = 0
-        for (k = 1; k <= mcnt[gk]; k++) if (isimpl[gk] || members[gk, k] != gk) ndm[++nd] = members[gk, k]
-        hdr = (gk in hdrtext) ? hdrtext[gk] : (isimpl[gk] ? gk : disp(gk))
-        if (nd == 0) { print "- `" hdr "`"; delete ndm; continue }
-        print "- `" hdr "`:"
-        for (k = 1; k <= nd; k++) print "  - `" (isimpl[gk] ? ndm[k] : member_disp(ndm[k], gk)) "`"
-        delete ndm
+    # Changed: the buffer is alternating `  - <old sig>` / `  + <new sig>` lines.
+    # Render each pair as old -> new so the entry actually shows what changed,
+    # rather than just naming the item (which a "Changed" entry must do).
+    if (mode == "changed") {
+        for (i = 1; i <= n; i++) {
+            line = buf[i]
+            if (line ~ /^  - /) { sub(/^  - /, "", line); pend = relsig(line); continue }
+            if (line ~ /^  \+ /) {
+                sub(/^  \+ /, "", line); nw = relsig(line)
+                if ((pend SUBSEP nw) in seenpair) continue
+                seenpair[pend SUBSEP nw] = 1
+                print "- `" pend "`"
+                print "  → `" nw "`"
+            }
+        }
+    } else {
+        for (i = 1; i <= n; i++) {
+            s = buf[i]
+            gk0 = group_key(s); qp = qual_path(s)
+            if ((gk0 SUBSEP qp) in seenitem) continue   # cargo-public-api dupes some impls
+            seenitem[gk0 SUBSEP qp] = 1
+            ig = impl_group(s, gk0, qp)
+            if (ig != "") { gk = ig; isimpl[gk] = 1 } else { gk = gk0 }
+            if (!(gk in seen)) { seen[gk] = 1; order[++norder] = gk }
+            if (ig != "" && G_ISHEADER) { hdrtext[gk] = G_HDRTEXT; continue }  # impl line: header only
+            if (ig != "") members[gk, ++mcnt[gk]] = last_seg(qp)       # impl member: leaf name
+            else members[gk, ++mcnt[gk]] = qp                          # type member: full path
+        }
+        for (o = 1; o <= norder; o++) {
+            gk = order[o]
+            nd = 0
+            for (k = 1; k <= mcnt[gk]; k++) if (isimpl[gk] || members[gk, k] != gk) ndm[++nd] = members[gk, k]
+            hdr = (gk in hdrtext) ? hdrtext[gk] : (isimpl[gk] ? gk : disp(gk))
+            if (nd == 0) { print "- `" hdr "`"; delete ndm; continue }
+            print "- `" hdr "`:"
+            for (k = 1; k <= nd; k++) print "  - `" (isimpl[gk] ? ndm[k] : member_disp(ndm[k], gk)) "`"
+            delete ndm
+        }
     }
 }'
 
