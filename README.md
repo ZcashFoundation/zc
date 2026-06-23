@@ -16,7 +16,8 @@ a single command tells you whether a branch breaks your published surface.
 2. **Transitive `Cargo.lock` diff** (`--with-lock`) — transitive version changes,
    each annotated with the direct deps that pull it in.
 3. **Per-crate public-API diff** (`cargo public-api`) — removed / changed / added
-   items per workspace crate.
+   items per workspace crate. Built with `--all-features` so feature-gated public
+   items are never silently missed.
 4. **Const/static value & doc-comment diff** (`--with-values`) — catches changes
    `cargo public-api` can't see, since it compares signatures only.
 

@@ -362,6 +362,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# cargo-public-api and the rustdoc JSON builds always run with all features, so
+# feature-gated public items are never silently missing from the diff, trait map,
+# or value/doc index. Kept identical across all of them so they stay in sync.
+feature_args=(--all-features)
+
 # In JSON or changelog mode, silence colours and redirect human-readable output
 # to /dev/null so the generated document is the only thing on stdout (fd 3).
 if $json_mode || $changelog_mode; then
@@ -1023,7 +1028,7 @@ dump_trait_map() { # $1=ref  $2..=crate names  -> stdout TSV: self member trait
         if [ -f "$cache_file" ]; then cat "$cache_file"; continue; fi
         progress "${DIM}--changelog: trait map [$idx/$total] $crate${RESET}"
         if CARGO_TARGET_DIR="$target" cargo +"$nightly_toolchain" rustdoc -q \
-            --manifest-path "$wt/Cargo.toml" -p "$crate" --lib \
+            --manifest-path "$wt/Cargo.toml" -p "$crate" --lib "${feature_args[@]}" \
             -- -Z unstable-options --output-format json >/dev/null 2>&1; then
             json="$target/doc/${crate//-/_}.json"
             if [ -f "$json" ]; then
@@ -1520,7 +1525,7 @@ for i in "${!all_crates[@]}"; do
     # `HEAD` resolves differently across worktrees (the snapshot worktree
     # has its own detached HEAD pointing at the synth commit, so passing
     # the literal string "HEAD" would diff snapshot-vs-snapshot).
-    if ! output=$(cd "$api_cwd" && cargo public-api -p "$crate_name" -sss diff "$baseline_sha..$head_sha" 2>"$err_file"); then
+    if ! output=$(cd "$api_cwd" && cargo public-api "${feature_args[@]}" -p "$crate_name" -sss diff "$baseline_sha..$head_sha" 2>"$err_file"); then
         # cargo-public-api failed outright (missing baseline, rustdoc
         # failure, etc.). Record and surface the error.
         error_crate_count=$((error_crate_count + 1))
@@ -1691,7 +1696,7 @@ if $with_values; then
                 idx=$((idx + 1))
                 progress "${DIM}--with-values: rustdoc JSON [$ref_label $idx/$crate_count] $crate${RESET}"
                 if CARGO_TARGET_DIR="$values_target" cargo +"$nightly_toolchain" rustdoc -q \
-                    --manifest-path "$wt/Cargo.toml" -p "$crate" --lib \
+                    --manifest-path "$wt/Cargo.toml" -p "$crate" --lib "${feature_args[@]}" \
                     -- -Z unstable-options --output-format json >/dev/null 2>&1; then
                     json="$values_target/doc/${crate//-/_}.json"
                     { [ -f "$json" ] && extract_value_doc "$json" "$crate" >>"$tmp_out"; } || true
