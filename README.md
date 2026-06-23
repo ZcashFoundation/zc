@@ -30,14 +30,15 @@ First install the prerequisites (see [Requirements](#requirements)):
 cargo install cargo-public-api    # required; jq is also required
 ```
 
-Then get `ziff` itself — it's a single Bash script, so either:
+Then get `ziff` itself — it's a single Bash script. Install it onto your `PATH`:
 
 ```sh
-# Install onto your PATH
-curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff \
-  -o ~/.local/bin/ziff && chmod +x ~/.local/bin/ziff
+curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff -o ~/.local/bin/ziff && chmod +x ~/.local/bin/ziff
+```
 
-# …or run a one-off without installing
+…or run a one-off without installing:
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff | bash -s -- main
 ```
 
