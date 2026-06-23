@@ -128,6 +128,16 @@ if printf '%s\n' "$flat" | grep -qE '^ +ziff_fixture::Widget +\(struct\)$'; then
 else
     ok "--flat: no group header"
 fi
+
+# 6b) A pre-existing type (declared in the baseline, only a method added) still
+#     gets a header tag — the generic (type), since no declaration is in the diff.
+head2=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Widget;\nimpl Widget {\n    pub fn new() -> Self { Widget }\n    pub fn run(&self) {}\n    pub fn extra(&self) {}\n}' 'add a method to existing Widget')
+out2=$( cd "$repo" && "$ZIFF" "$head" "$head2" 2>&1 )
+if printf '%s\n' "$out2" | grep -qE '^ +ziff_fixture::Widget +\(type\)$'; then
+    ok "grouping: pre-existing type gets a fallback (type) tag"
+else
+    bad "grouping: expected 'ziff_fixture::Widget  (type)' for an undeclared type"
+fi
 rm -rf "$repo"
 
 echo ""

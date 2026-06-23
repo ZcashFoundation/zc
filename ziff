@@ -55,10 +55,12 @@
 #   --flat           Don't group the per-crate API items. By default, items in
 #                    each Removed/Changed/Added list are clustered under a dim
 #                    header naming the type or module that owns them, tagged
-#                    with its kind (e.g. `(struct)`), and the shared path prefix
-#                    is elided from each item. A type declaration heads its own
-#                    group alongside its methods, fields, variants, and impls.
-#                    --flat prints the original flat, fully-qualified list.
+#                    with its kind — `(struct)`/`(enum)`/… when declared in the
+#                    diff, inferred from members otherwise, or a generic
+#                    `(type)`/`(mod)` as a last resort — and the shared path
+#                    prefix is elided from each item. A type declaration heads
+#                    its own group alongside its methods, fields, variants, and
+#                    impls. --flat prints the original flat, fully-qualified list.
 #   --fetch[=<remote>]
 #                    Fetch the baseline branch from <remote> before comparing,
 #                    so a stale local `main` can't skew the diff (e.g. when
@@ -1683,6 +1685,22 @@ function decl_kind(s,   t) {
     }
     return ""
 }
+# Weak kind inferred from a member when the declaration is not in the diff: a
+# field implies a struct, a (tuple/unit) variant implies an enum.
+function member_kind(s) {
+    gsub(/^#\[[^]]*\] +/, "", s)
+    if (s !~ /^pub /) return ""
+    if (s ~ /^pub (mod|struct|enum|trait|union|fn|const|static|type|use|async) /) return ""
+    if (s ~ /: /) return "struct"
+    return "enum"
+}
+# Last-resort kind from the key by Rust naming convention: an UpperCamelCase
+# leaf is a type, anything else (snake_case path / crate root) is a module.
+function fallback_kind(k,   seg) {
+    seg = k; sub(/.*::/, "", seg)
+    if (seg ~ /^[A-Z]/) return "type"
+    return "mod"
+}
 /^[[:space:]]*$/ { next }
 { buf[++n] = $0 }
 END {
@@ -1692,21 +1710,26 @@ END {
     for (i = 1; i <= n; i++) {
         s = buf[i]
         if (mode == "changed") {
-            if (s ~ /^  - /) { sig = s; sub(/^  - /, "", sig); ckey = group_key(sig); dk = decl_kind(sig) }
-            else dk = ""
+            if (s ~ /^  - /) { sig = s; sub(/^  - /, "", sig); ckey = group_key(sig); dk = decl_kind(sig); mk = member_kind(sig) }
+            else { dk = ""; mk = "" }
             gk[i] = ckey
         } else {
             gk[i] = group_key(s)
             dk = decl_kind(s)
+            mk = member_kind(s)
         }
         if (dk != "") gkind[gk[i]] = dk
+        if (mk != "" && !(gk[i] in gkindw)) gkindw[gk[i]] = mk
     }
     # Pass 2: emit header records (key + kind) and item records, eliding the
     # shared module prefix (the key minus its last segment) from each item.
     first = 1; prev = ""; mp = ""
     for (i = 1; i <= n; i++) {
         if (first || gk[i] != prev) {
-            print "H\t" gk[i] "\t" gkind[gk[i]]
+            k = gkind[gk[i]]
+            if (k == "") k = gkindw[gk[i]]
+            if (k == "") k = fallback_kind(gk[i])
+            print "H\t" gk[i] "\t" k
             prev = gk[i]; first = 0
             mp = gk[i]; sub(/::[^:]*$/, "", mp)
         }
