@@ -24,12 +24,34 @@ It ends with a `BREAKING` / `ERROR` / `OK` verdict (and a `--json` mode for CI).
 
 ## Install
 
+First install the prerequisites (see [Requirements](#requirements)):
+
 ```sh
-cargo install cargo-public-api    # required
-# jq is required; a nightly toolchain is needed only for --with-values
+cargo install cargo-public-api    # required; jq is also required
 ```
 
-Then drop `ziff` somewhere on your `PATH` (it's a single Bash script).
+Then get `ziff` itself — it's a single Bash script, so either:
+
+```sh
+# Install onto your PATH
+curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff \
+  -o ~/.local/bin/ziff && chmod +x ~/.local/bin/ziff
+
+# …or run a one-off without installing
+curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff | bash -s -- main
+```
+
+In CI, the download-then-run form is the most robust:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff -o ziff
+chmod +x ziff
+./ziff "$BASE".."$HEAD" --json
+```
+
+> When run via `curl … | bash`, `--help` shows only a short usage (the script
+> can't re-read its own source from a pipe); install it to a file for the full
+> reference.
 
 ## Usage
 

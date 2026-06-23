@@ -178,6 +178,13 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
+# Version string. Used as the dep-cache key when the script isn't a readable
+# file on disk (e.g. run via `curl … | bash`, where $0 can't be hashed). Bump
+# it whenever the dep-dump / metadata logic changes so piped runs don't reuse a
+# stale cache. When run from a real file, the file's content hash is used
+# instead (see SCRIPT_HASH below), so this only matters for piped execution.
+ZIFF_VERSION=0.1.0
+
 # ── tunables ──────────────────────────────────────────────────────────
 # Regex (jq-syntax) matching crate names whose deps should be excluded
 # from the workspace dep classification. These are test-only crates
@@ -248,8 +255,26 @@ progress_clear() {
 }
 
 # ── help ──────────────────────────────────────────────────────────────
+# The full help is the leading comment block of this file, extracted with sed.
+# That only works when $0 is a readable file; when piped (`curl … | bash`) the
+# source isn't re-readable, so fall back to a short usage that points at a
+# downloadable copy for the full reference.
 show_help() {
-    sed -n '/^#/!q; s/^# \{0,1\}//; 1d; p' "$0"
+    if [ -f "$0" ] && [ -r "$0" ]; then
+        sed -n '/^#/!q; s/^# \{0,1\}//; 1d; p' "$0"
+        return
+    fi
+    cat <<'EOF'
+ziff — diff the public API and dependencies of a Rust workspace between two git refs.
+
+Usage: ziff [options] [<baseline> [<head>]]
+
+Options: --with-lock  --fetch[=<remote>]  --with-values  --json  -h/--help
+
+Piped execution shows only this short help. For the full reference, grab a copy:
+  curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff -o ziff
+  chmod +x ziff && ./ziff --help
+EOF
 }
 
 with_lock=false
@@ -632,8 +657,14 @@ workspace_crate_names() {
 
 # Cache directory for resolved dep dumps. Keyed on the ref's resolved SHA
 # plus a hash of this script, so edits to the jq query invalidate the cache.
+# When $0 isn't a readable file (piped via `curl … | bash`), it can't be
+# hashed, so fall back to the version string as the cache key.
 CACHE_DIR="${CARGO_TARGET_DIR:-target}/ziff-cache"
-SCRIPT_HASH=$(sha1_short "$0")
+if [ -f "$0" ] && [ -r "$0" ]; then
+    SCRIPT_HASH=$(sha1_short "$0")
+else
+    SCRIPT_HASH="v${ZIFF_VERSION}"
+fi
 mkdir -p "$CACHE_DIR" 2>/dev/null || true
 
 # Per-run temp directory for worktrees; cleaned on exit. Each worktree gets
@@ -1831,4 +1862,8 @@ else
         echo "${GREEN}OK: no breaking changes.${RESET}"
     fi
     [ "$doc_changed_total" -gt 0 ] && echo "${DIM}(also $doc_changed_total public doc-comment change(s))${RESET}"
+    # Explicit success: the trailing `[ … ] && echo` above evaluates to exit 1
+    # when there are no doc changes, which would otherwise make this non-breaking
+    # path wrongly report failure.
+    exit 0
 fi
