@@ -86,8 +86,10 @@
 #                    instead of the diff: one `## <crate>` section per changed
 #                    crate, with `### Added`/`### Changed`/`### Removed` lists
 #                    grouped under their owning type (own-crate paths made
-#                    crate-relative, foreign-type paths kept in full). Other
-#                    output is suppressed.
+#                    crate-relative, foreign-type paths kept in full). Per-crate
+#                    dependency changes are folded in too: internal workspace
+#                    bumps and external `Migrated to ...` lines under Changed,
+#                    dropped deps under Removed. Other output is suppressed.
 #   --json           Emit a machine-readable JSON summary on stdout (all
 #                    human-readable output is suppressed). Schema:
 #                      {
@@ -941,6 +943,66 @@ dump_workspace_deps() {
     cat "$cache_file"
 }
 
+# Dump one TSV row per (workspace crate, direct runtime/build dependency) at a
+# ref. Unlike `dump_workspace_deps` this is used only by --changelog and differs
+# in two ways: it keeps workspace-internal crates (their version bumps are the
+# single most common dependency line in these changelogs) and preserves the
+# per-crate granularity the changelog needs (each crate's section lists its own
+# dependency changes). Columns:
+#
+#   crate   the workspace crate that declares the dependency
+#   dep     the dependency's display key (rename if any, else real crate name)
+#   req     version requirement from Cargo.toml (leading "^" stripped)
+#   scope   "int" if the dep is itself a workspace member, else "ext"
+#
+# Dev-only dependencies are skipped — they are not part of the published API or
+# runtime surface and Zebra/lrz changelogs never document them. Cached on
+# ref-SHA + script hash like the other dumps.
+dump_per_crate_deps() { # $1=ref -> stdout TSV
+    local ref=$1 sha cache_file tmp meta
+    sha=$(git rev-parse --verify "$ref" 2>/dev/null) || return 1
+    cache_file="$CACHE_DIR/${sha}.${SCRIPT_HASH}.percrate-deps.tsv"
+    if [ -s "$cache_file" ]; then cat "$cache_file"; return 0; fi
+    tmp=$(mktemp -d -p "$RUN_TMP")
+    if ! git worktree add --detach --quiet "$tmp" "$ref" 2>/dev/null; then
+        echo "${YELLOW}warning:${RESET} could not create worktree for '$ref' (per-crate deps)" >&2
+        return 1
+    fi
+    if ! meta=$(cargo metadata --manifest-path "$tmp/Cargo.toml" \
+        --no-deps --format-version 1 --locked 2>/dev/null); then
+        git worktree remove --force "$tmp" >/dev/null 2>&1 || true
+        echo "${YELLOW}warning:${RESET} cargo metadata failed at '$ref' (per-crate deps)" >&2
+        return 1
+    fi
+    git worktree remove --force "$tmp" >/dev/null 2>&1 || true
+    jq -r --arg test_pat "$TEST_CRATE_PATTERN" '
+        (.workspace_members) as $ws_ids |
+        ([ .packages[] | select(.id as $id | $ws_ids | index($id)) | .name ]) as $ws_names |
+        [ .packages[]
+          | select(.id as $id | $ws_ids | index($id))
+          | select(.name | test($test_pat) | not)
+          | .name as $crate
+          | .dependencies[]
+          | .name as $depname
+          | select(.kind == null or .kind == "normal" or .kind == "build")
+          | { crate: $crate,
+              dep: (.rename // .name),
+              req: ((.req // "-") | sub("^\\^"; "")),
+              scope: (if ($ws_names | index($depname)) then "int" else "ext" end) }
+        ]
+        | unique_by(.crate + "/" + .dep)
+        | sort_by(.crate, .dep)
+        | .[]
+        | [ .crate, .dep, .req, .scope ] | @tsv
+    ' <<<"$meta" >"$cache_file.tmp" || {
+        rm -f "$cache_file.tmp"
+        echo "${YELLOW}warning:${RESET} jq failed processing per-crate deps for '$ref'" >&2
+        return 1
+    }
+    mv "$cache_file.tmp" "$cache_file"
+    cat "$cache_file"
+}
+
 base_dump=$(dump_workspace_deps "$baseline") || exit 1
 head_dump=$(dump_workspace_deps "$head_ref") || exit 1
 
@@ -1658,7 +1720,10 @@ echo "${BOLD}Summary${RESET}  ${DIM}(${changed_crate_count}/${crate_count} crate
 if [ $((removed_total + changed_total + added_total + value_changed_total + doc_changed_total)) -eq 0 ]; then
     echo ""
     echo "  ${GREEN}No public API changes.${RESET}"
-    if ! $json_mode; then
+    # In changelog mode, fall through even with no API changes: a crate may still
+    # have dependency-only changes to document (Zebra's "No API changes; internal
+    # dependencies updated" case).
+    if ! $json_mode && ! $changelog_mode; then
         # Still emit the final verdict so dep-only changes surface.
         if [ "$dep_breaking_count" -gt 0 ]; then
             echo ""
@@ -2033,26 +2098,64 @@ has_breaking=false
 # saved stdout (fd 3), one section per changed crate, then stop. (Trait
 # attribution from rustdoc JSON is layered onto this in a later pass.)
 if $changelog_mode; then
+    # Per-crate dependency changes, keyed by crate name. Internal workspace
+    # crate bumps and external migrations go under "### Changed"; removals under
+    # "### Removed". Added deps are intentionally not emitted — Zebra/lrz
+    # changelogs do not document them.
+    declare -A dep_changed_md=() dep_removed_md=()
+    pc_base=$(dump_per_crate_deps "$baseline_sha" 2>/dev/null) || pc_base=""
+    pc_head=$(dump_per_crate_deps "$head_sha" 2>/dev/null) || pc_head=""
+    if [ -n "$pc_base$pc_head" ]; then
+        while IFS=$'\t' read -r tag cr md; do
+            [ -z "$tag" ] && continue
+            case "$tag" in
+            C) dep_changed_md["$cr"]+="${md}"$'\n' ;;
+            R) dep_removed_md["$cr"]+="${md}"$'\n' ;;
+            esac
+        done < <(awk -F'\t' '
+            $1 == "" { next }
+            FNR == NR { b[$1 SUBSEP $2] = $3; bseen[$1 SUBSEP $2] = 1; next }
+            {
+                k = $1 SUBSEP $2; hseen[k] = 1
+                if ((k in bseen) && b[k] != $3) {
+                    if ($4 == "int")
+                        printf "C\t%s\t- `%s` dependency bumped to `%s`.\n", $1, $2, $3
+                    else
+                        printf "C\t%s\t- Migrated to `%s %s`.\n", $1, $2, $3
+                }
+            }
+            END {
+                for (k in bseen) if (!(k in hseen)) {
+                    split(k, a, SUBSEP)
+                    printf "R\t%s\t- `%s` dependency.\n", a[1], a[2]
+                }
+            }
+        ' <(printf '%s\n' "$pc_base") <(printf '%s\n' "$pc_head"))
+    fi
     {
         for i in "${!crate_names[@]}"; do
+            name="${crate_names[$i]}"
             r="${crate_removed[$i]}" c="${crate_changed[$i]}" a="${crate_added[$i]}"
-            [ $((r + c + a)) -eq 0 ] && continue
-            pfx="${crate_names[$i]//-/_}"
-            echo "## ${crate_names[$i]}"
+            dc="${dep_changed_md[$name]:-}" dr="${dep_removed_md[$name]:-}"
+            [ $((r + c + a)) -eq 0 ] && [ -z "$dc" ] && [ -z "$dr" ] && continue
+            pfx="${name//-/_}"
+            echo "## ${name}"
             echo ""
             if [ "$a" -gt 0 ]; then
                 echo "### Added"
                 render_changelog "${crate_added_lines[$i]}" added "$pfx"
                 echo ""
             fi
-            if [ "$c" -gt 0 ]; then
+            if [ "$c" -gt 0 ] || [ -n "$dc" ]; then
                 echo "### Changed"
-                render_changelog "${crate_changed_lines[$i]}" changed "$pfx"
+                [ -n "$dc" ] && printf '%s' "$dc"
+                [ "$c" -gt 0 ] && render_changelog "${crate_changed_lines[$i]}" changed "$pfx"
                 echo ""
             fi
-            if [ "$r" -gt 0 ]; then
+            if [ "$r" -gt 0 ] || [ -n "$dr" ]; then
                 echo "### Removed"
-                render_changelog "${crate_removed_lines[$i]}" removed "$pfx"
+                [ "$r" -gt 0 ] && render_changelog "${crate_removed_lines[$i]}" removed "$pfx"
+                [ -n "$dr" ] && printf '%s' "$dr"
                 echo ""
             fi
         done

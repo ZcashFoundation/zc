@@ -247,6 +247,61 @@ assert_contains "$out" "- \`Widget\`:" "--changelog: type group header (crate-re
 assert_contains "$out" "- \`new\`" "--changelog: member shown as a bare name"
 rm -rf "$repo"
 
+# 6i) --changelog documents per-crate dependency changes: an internal workspace
+#     crate bump becomes a "dependency bumped to" line under ### Changed, and a
+#     dropped dependency becomes a "dependency." line under ### Removed. Uses
+#     versioned path deps so the requirement string actually changes (and so the
+#     fixture resolves offline).
+ws=$(mktemp -d)
+mkdir -p "$ws/dep/src" "$ws/dep2/src" "$ws/ziff_fixture/src"
+printf '/target\n' >"$ws/.gitignore"
+cat >"$ws/Cargo.toml" <<'EOF'
+[workspace]
+members = ["dep", "dep2", "ziff_fixture"]
+resolver = "2"
+EOF
+printf '[package]\nname = "dep"\nversion = "0.1.0"\nedition = "2021"\n' >"$ws/dep/Cargo.toml"
+printf '[package]\nname = "dep2"\nversion = "0.1.0"\nedition = "2021"\n' >"$ws/dep2/Cargo.toml"
+echo 'pub struct Foo;' >"$ws/dep/src/lib.rs"
+echo 'pub struct Bar;' >"$ws/dep2/src/lib.rs"
+cat >"$ws/ziff_fixture/Cargo.toml" <<'EOF'
+[package]
+name = "ziff_fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dep = { path = "../dep", version = "0.1.0" }
+dep2 = { path = "../dep2", version = "0.1.0" }
+EOF
+echo 'pub fn placeholder() {}' >"$ws/ziff_fixture/src/lib.rs"
+git -C "$ws" init -q
+git -C "$ws" config user.email t@t
+git -C "$ws" config user.name t
+( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
+git -C "$ws" add -A
+git -C "$ws" commit -qm base
+base=$(git -C "$ws" rev-parse HEAD)
+# Bump `dep` to 0.2.0 (updating ziff_fixture's requirement) and drop `dep2`.
+printf '[package]\nname = "dep"\nversion = "0.2.0"\nedition = "2021"\n' >"$ws/dep/Cargo.toml"
+cat >"$ws/ziff_fixture/Cargo.toml" <<'EOF'
+[package]
+name = "ziff_fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dep = { path = "../dep", version = "0.2.0" }
+EOF
+( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
+git -C "$ws" add -A
+git -C "$ws" commit -qm head
+head=$(git -C "$ws" rev-parse HEAD)
+out=$( cd "$ws" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+assert_contains "$out" "- \`dep\` dependency bumped to \`0.2.0\`." "--changelog: internal dep bump under Changed"
+assert_contains "$out" "- \`dep2\` dependency." "--changelog: dropped dep under Removed"
+rm -rf "$ws"
+
 echo ""
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]
