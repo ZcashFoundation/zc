@@ -66,6 +66,15 @@ tracking ref and warns with that ref's commit age.
 - `1` — breaking changes detected, `cargo public-api` failed for a crate, or a
   runtime error
 
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
 ---
 
 Originally developed in the [Zebra](https://github.com/ZcashFoundation/zebra)
