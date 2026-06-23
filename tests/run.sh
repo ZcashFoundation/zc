@@ -104,44 +104,59 @@ assert_eq "$rc" 1 "--fetch with no remote: exit 1"
 assert_contains "$out" "no remote found" "--fetch with no remote: clear error"
 rm -rf "$repo"
 
-# 6) Default grouping is by MODULE: items cluster under a module header with no
-#    kind tag, and the shared module prefix is elided from each item.
+# 6) Default grouping is a MODULE > TYPE > member hierarchy: items cluster under
+#    their module, then under a type sub-header (tagged with its kind), with the
+#    type prefix factored out of each member.
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
-head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Widget;\nimpl Widget {\n    pub fn new() -> Self { Widget }\n    pub fn run(&self) {}\n}' 'add Widget type')
+head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub enum Color { Red, Green, Blue }' 'add Color enum')
 out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 )
 if printf '%s\n' "$out" | grep -qE '^ +ziff_fixture$'; then
-    ok "mod grouping (default): bare module header, no kind tag"
+    ok "default: bare module header (no tag)"
 else
-    bad "mod grouping: expected a bare 'ziff_fixture' module header"
+    bad "default: expected a bare 'ziff_fixture' module header"
 fi
-assert_contains "$out" "+ pub struct Widget" "mod grouping: shared module prefix elided"
+if printf '%s\n' "$out" | grep -qE '^ +Color +\(enum\)$'; then
+    ok "default: type sub-header with (enum) tag"
+else
+    bad "default: expected a 'Color  (enum)' sub-header"
+fi
+assert_contains "$out" "+ pub Red" "default: type prefix factored from variant"
+if printf '%s\n' "$out" | grep -qF 'pub Color::Red'; then
+    bad "default: variant should not repeat the Color:: prefix"
+else
+    ok "default: Color:: prefix not repeated on variants"
+fi
 
-# 6b) --by-type groups by the owning type and tags the header with its kind.
+# 6b) --by-type uses a flat type header (tagged); members keep the type prefix.
 byt=$( cd "$repo" && "$ZIFF" --by-type "$base" "$head" 2>&1 )
-if printf '%s\n' "$byt" | grep -qE '^ +ziff_fixture::Widget +\(struct\)$'; then
-    ok "--by-type: type header with (struct) tag"
+if printf '%s\n' "$byt" | grep -qE '^ +ziff_fixture::Color +\(enum\)$'; then
+    ok "--by-type: flat type header with (enum) tag"
 else
-    bad "--by-type: expected 'ziff_fixture::Widget  (struct)' header"
+    bad "--by-type: expected 'ziff_fixture::Color  (enum)' header"
 fi
-# A pre-existing type (no declaration in the diff) still gets a fallback (type) tag.
-head2=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Widget;\nimpl Widget {\n    pub fn new() -> Self { Widget }\n    pub fn run(&self) {}\n    pub fn extra(&self) {}\n}' 'add a method to existing Widget')
-byt2=$( cd "$repo" && "$ZIFF" --by-type "$head" "$head2" 2>&1 )
-if printf '%s\n' "$byt2" | grep -qE '^ +ziff_fixture::Widget +\(type\)$'; then
-    ok "--by-type: undeclared type gets fallback (type) tag"
-else
-    bad "--by-type: expected 'ziff_fixture::Widget  (type)' for undeclared type"
-fi
+assert_contains "$byt" "+ pub Color::Red" "--by-type: members keep the type prefix"
 
 # 6c) --flat keeps fully-qualified paths and emits no indented group header.
 flat=$( cd "$repo" && "$ZIFF" --flat "$base" "$head" 2>&1 )
-assert_contains "$flat" "pub struct ziff_fixture::Widget" "--flat: keeps fully-qualified paths"
-# A group header is an indented path alone (optionally a kind tag); the per-crate
-# summary line (which has counts after the name) must not be mistaken for one.
-if printf '%s\n' "$flat" | grep -qE '^ +ziff_fixture(::[A-Za-z0-9_]+)*( +\([a-z]+\))?$'; then
+assert_contains "$flat" "pub ziff_fixture::Color::Red" "--flat: keeps fully-qualified paths"
+if printf '%s\n' "$flat" | grep -qE '^ +(ziff_fixture|Color)(::[A-Za-z0-9_]+)*( +\([a-z]+\))?$'; then
     bad "--flat: should not emit a group header"
 else
     ok "--flat: no group header"
+fi
+rm -rf "$repo"
+
+# 6d) Fallback kind: a pre-existing type with only a method added (no declaration,
+#     variant, or field in the diff) gets a generic (type) sub-header.
+repo=$(new_repo $'pub struct Widget;\nimpl Widget { pub fn a(&self) {} }')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" $'pub struct Widget;\nimpl Widget { pub fn a(&self) {} pub fn b(&self) {} }' 'add method b')
+out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 )
+if printf '%s\n' "$out" | grep -qE '^ +Widget +\(type\)$'; then
+    ok "default: undeclared type gets fallback (type) sub-header"
+else
+    bad "default: expected a 'Widget  (type)' fallback sub-header"
 fi
 rm -rf "$repo"
 

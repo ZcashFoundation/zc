@@ -52,15 +52,15 @@
 # OPTIONS
 #   -h, --help       Print this help message and exit.
 #   --with-lock      Also diff Cargo.lock for transitive dep changes.
-#                    By default, items in each Removed/Changed/Added list are
-#                    grouped under a dim header for the MODULE that owns them,
-#                    with the shared module prefix elided from each item.
-#   --by-type        Group by the owning TYPE instead of the module: each type's
-#                    declaration heads its own group alongside its methods,
-#                    fields, variants, and impls, and the header is tagged with
-#                    the type's kind — `(struct)`/`(enum)`/… when declared in the
-#                    diff, inferred from members otherwise, or a generic
-#                    `(type)`/`(mod)` as a last resort.
+#   --by-type        By default, per-crate API items are grouped into a
+#                    module > type > member hierarchy: a module header, then a
+#                    type sub-header tagged with its kind (`(struct)`/`(enum)`/…
+#                    when declared in the diff, inferred from members otherwise,
+#                    or a generic `(type)`/`(mod)`), with the module and type
+#                    prefixes factored out of each item; items living directly in
+#                    a module (free fns, consts, mod decls) sit under the module
+#                    header. --by-type uses a flat type grouping instead: one
+#                    tagged header per type, members keeping their `Type::` prefix.
 #   --flat           Don't group at all; print the original flat,
 #                    fully-qualified, one-item-per-line list.
 #   --fetch[=<remote>]
@@ -1715,47 +1715,70 @@ function fallback_kind(k,   seg) {
     if (seg ~ /^[A-Z]/) return "type"
     return "mod"
 }
+# Resolved kind for a type key: declared > inferred-from-member > fallback.
+function kind_of(t) {
+    if (t in tkind) return tkind[t]
+    if (t in tkindw) return tkindw[t]
+    return fallback_kind(t)
+}
 /^[[:space:]]*$/ { next }
 { buf[++n] = $0 }
 END {
-    # Pass 1: assign each line a group key, and record a group kind from any
-    # declaration line. In changed mode the key comes from the `- old` line and
-    # carries to the following `+ new` line.
+    # Pass 1: per line, the owning type key tk[i] and its module mkey[i], plus a
+    # kind recorded per type key (declaration > member-inferred). In changed mode
+    # the key comes from the `- old` line and carries to the following `+ new`.
     for (i = 1; i <= n; i++) {
         s = buf[i]
         if (mode == "changed") {
             if (s ~ /^  - /) { sig = s; sub(/^  - /, "", sig); ctk = group_key(sig); dk = decl_kind(sig); mk = member_kind(sig) }
             else { dk = ""; mk = "" }
-            tk = ctk
+            tk[i] = ctk
         } else {
-            tk = group_key(s)
+            tk[i] = group_key(s)
             dk = decl_kind(s)
             mk = member_kind(s)
         }
-        gk[i] = (level == "mod") ? mod_of(tk) : tk
-        if (level == "type") {
-            if (dk != "") gkind[gk[i]] = dk
-            if (mk != "" && !(gk[i] in gkindw)) gkindw[gk[i]] = mk
-        }
+        mkey[i] = mod_of(tk[i])
+        if (dk != "") tkind[tk[i]] = dk
+        if (mk != "" && !(tk[i] in tkindw)) tkindw[tk[i]] = mk
     }
-    # Pass 2: emit header records (key + kind) and item records, eliding the
-    # shared module prefix (the key minus its last segment) from each item.
-    first = 1; prev = ""; mp = ""
-    for (i = 1; i <= n; i++) {
-        if (first || gk[i] != prev) {
-            if (level == "type") {
-                k = gkind[gk[i]]
-                if (k == "") k = gkindw[gk[i]]
-                if (k == "") k = fallback_kind(gk[i])
-            } else k = ""
-            print "H\t" gk[i] "\t" k
-            prev = gk[i]; first = 0
-            if (level == "mod") mp = gk[i]
-            else { mp = gk[i]; sub(/::[^:]*$/, "", mp) }
+
+    if (level == "type") {
+        # Flat: one header per type; members elided of the type module prefix.
+        first = 1; prev = ""; mp = ""
+        for (i = 1; i <= n; i++) {
+            if (first || tk[i] != prev) {
+                print "H\t" tk[i] "\t" kind_of(tk[i])
+                prev = tk[i]; first = 0
+                mp = tk[i]; sub(/::[^:]*$/, "", mp)
+            }
+            disp = buf[i]
+            if (mp != "") gsub(mp "::", "", disp)
+            print "I\t" disp
         }
-        disp = buf[i]
-        if (mp != "") gsub(mp "::", "", disp)
-        print "I\t" disp
+    } else {
+        # Nested: module header (M) > type sub-header (T) > members (J); items
+        # that live directly in the module (free fns, consts, mod decls) are I.
+        mfirst = 1; prevmod = ""; prevtype = ""
+        for (i = 1; i <= n; i++) {
+            m = mkey[i]; t = tk[i]
+            if (mfirst || m != prevmod) {
+                print "M\t" m
+                prevmod = m; prevtype = ""; mfirst = 0
+            }
+            disp = buf[i]
+            if (t != m) {
+                if (t != prevtype) { print "T\t" substr(t, length(m) + 3) "\t" kind_of(t); prevtype = t }
+                gsub(t "::", "", disp)
+                gsub(m "::", "", disp)
+                print "J\t" disp
+            } else {
+                prevtype = ""
+                gsub(m "::", "", disp)
+                if (disp ~ /^pub mod /) { nm = disp; sub(/.*::/, "", nm); disp = "pub mod " nm }
+                print "I\t" disp
+            }
+        }
     }
 }'
 
@@ -1784,31 +1807,39 @@ render_items() {
         return
     fi
 
-    local first=1 rec a b
+    # Record stream from the awk: H = top type header (--by-type), M = module
+    # header, T = type sub-header (nested), I = item under H/M, J = item under T.
+    # Headers sit at 4 spaces, sub-headers and shallow items at 6, deep items at 8.
+    local prev_rec="" rec a b ind
     while IFS=$'\t' read -r rec a b; do
         case "$rec" in
         H)
-            [ "$first" = 0 ] && echo ""
-            first=0
-            if [ -n "$b" ]; then
-                echo "    ${DIM}${a:-(other)}  (${b})${RESET}"
-            else
-                echo "    ${DIM}${a:-(other)}${RESET}"
-            fi
+            [ -n "$prev_rec" ] && echo ""
+            if [ -n "$b" ]; then echo "    ${DIM}${a:-(other)}  (${b})${RESET}"; else echo "    ${DIM}${a:-(other)}${RESET}"; fi
             ;;
-        I)
+        M)
+            [ -n "$prev_rec" ] && echo ""
+            echo "    ${DIM}${a:-(other)}${RESET}"
+            ;;
+        T)
+            { [ -n "$prev_rec" ] && [ "$prev_rec" != M ]; } && echo ""
+            echo "      ${DIM}${a}  (${b})${RESET}"
+            ;;
+        I | J)
+            [ "$rec" = J ] && ind="        " || ind="      "
             case "$kind" in
-            removed) echo "      ${RED}- ${a}${RESET}" ;;
-            added) echo "      ${GREEN}+ ${a}${RESET}" ;;
+            removed) echo "${ind}${RED}- ${a}${RESET}" ;;
+            added) echo "${ind}${GREEN}+ ${a}${RESET}" ;;
             changed)
                 case "$a" in
-                "  - "*) echo "      ${RED}${a#  }${RESET}" ;;
-                "  + "*) echo "      ${GREEN}${a#  }${RESET}" ;;
-                *) echo "      $a" ;;
+                "  - "*) echo "${ind}${RED}${a#  }${RESET}" ;;
+                "  + "*) echo "${ind}${GREEN}${a#  }${RESET}" ;;
+                *) echo "${ind}${a}" ;;
                 esac ;;
             esac
             ;;
         esac
+        prev_rec="$rec"
     done < <(printf '%s' "$buffer" | awk -v mode="$mode" -v level="$group_mode" "$GROUP_AWK")
 }
 
