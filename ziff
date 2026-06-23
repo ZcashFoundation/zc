@@ -2136,11 +2136,17 @@ END {
             }
         }
     } else {
+        # lazy_static wrappers (anything with a LazyStatic impl): their whole impl
+        # cluster (Deref/Pointable/Receiver/LazyStatic + assoc items) is macro
+        # machinery, keyed by the wrapper Self type.
+        for (i = 1; i <= n; i++) if (buf[i] ~ /^impl[ <].*LazyStatic.* for /) lazystatic[group_key(buf[i])] = 1
         for (i = 1; i <= n; i++) {
             s = buf[i]
             if (s ~ /^impl[ <]/ && s !~ / for /) continue  # inherent impl block header, not an item
             if (is_proptest(s)) continue                   # proptest Arbitrary machinery (test-only)
+            if (s ~ /^impl[ <].*Structural(Partial)?Eq.* for /) continue  # compiler-internal derive marker
             gk0 = group_key(s); qp = qual_path(s)
+            if ((gk0 in lazystatic) && qp != gk0) continue  # lazy_static machinery (keep the type decl)
             if ((gk0 SUBSEP qp) in seenitem) continue   # cargo-public-api dupes some impls
             seenitem[gk0 SUBSEP qp] = 1
             ig = impl_group(s, gk0, qp)

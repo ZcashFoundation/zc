@@ -385,6 +385,19 @@ case "$out" in
 esac
 rm -rf "$repo"
 
+# 6s) The compiler-internal `StructuralPartialEq` marker (emitted by a PartialEq
+#     derive) is dropped, while the real `impl PartialEq` is kept.
+repo=$(new_repo 'pub fn placeholder() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" $'pub fn placeholder() {}\n#[derive(PartialEq)]\npub struct X(pub u8);' 'derive PartialEq')
+out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+assert_contains "$out" "impl PartialEq for X" "--changelog: real derived impl kept"
+case "$out" in
+*StructuralPartialEq*) bad "--changelog: StructuralPartialEq compiler marker must be dropped" ;;
+*) ok "--changelog: StructuralPartialEq marker dropped" ;;
+esac
+rm -rf "$repo"
+
 # 6k) A `const fn` must keep its name, not collapse to a stray `fn` group (the
 #     keyword strip has to consume the `const`/`async`/`unsafe` qualifier *and*
 #     the `fn`).
