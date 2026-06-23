@@ -52,15 +52,17 @@
 # OPTIONS
 #   -h, --help       Print this help message and exit.
 #   --with-lock      Also diff Cargo.lock for transitive dep changes.
-#   --flat           Don't group the per-crate API items. By default, items in
-#                    each Removed/Changed/Added list are clustered under a dim
-#                    header naming the type or module that owns them, tagged
-#                    with its kind — `(struct)`/`(enum)`/… when declared in the
+#                    By default, items in each Removed/Changed/Added list are
+#                    grouped under a dim header for the MODULE that owns them,
+#                    with the shared module prefix elided from each item.
+#   --by-type        Group by the owning TYPE instead of the module: each type's
+#                    declaration heads its own group alongside its methods,
+#                    fields, variants, and impls, and the header is tagged with
+#                    the type's kind — `(struct)`/`(enum)`/… when declared in the
 #                    diff, inferred from members otherwise, or a generic
-#                    `(type)`/`(mod)` as a last resort — and the shared path
-#                    prefix is elided from each item. A type declaration heads
-#                    its own group alongside its methods, fields, variants, and
-#                    impls. --flat prints the original flat, fully-qualified list.
+#                    `(type)`/`(mod)` as a last resort.
+#   --flat           Don't group at all; print the original flat,
+#                    fully-qualified, one-item-per-line list.
 #   --fetch[=<remote>]
 #                    Fetch the baseline branch from <remote> before comparing,
 #                    so a stale local `main` can't skew the diff (e.g. when
@@ -278,7 +280,7 @@ ziff — diff the public API and dependencies of a Rust workspace between two gi
 
 Usage: ziff [options] [<baseline> [<head>]]
 
-Options: --with-lock  --fetch[=<remote>]  --with-values  --flat  --json  -h/--help
+Options: --with-lock  --fetch[=<remote>]  --with-values  --by-type  --flat  --json  -h/--help
 
 Piped execution shows only this short help. For the full reference, grab a copy:
   curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff -o ziff
@@ -291,7 +293,9 @@ with_values=false
 json_mode=false
 do_fetch=false
 fetch_remote=""
-group=true
+# Per-crate item grouping: mod (default) clusters by owning module; type
+# clusters by owning type (with kind tags); flat is the ungrouped list.
+group_mode="mod"
 while [ $# -gt 0 ]; do
     case "$1" in
     -h | --help)
@@ -303,7 +307,11 @@ while [ $# -gt 0 ]; do
         shift
         ;;
     --flat)
-        group=false
+        group_mode="flat"
+        shift
+        ;;
+    --by-type)
+        group_mode="type"
         shift
         ;;
     --fetch)
@@ -1676,6 +1684,12 @@ function group_key(s,   p, isdecl) {
     if (!isdecl && p ~ /::/) sub(/::[^:]+$/, "", p)
     return p
 }
+# Module owning a type key: strip trailing UpperCamelCase (type) segments, so
+# `a::b::Foo` and `a::b::block_request::Bar` collapse to their module paths.
+function mod_of(k) {
+    while (k ~ /::[A-Z][^:]*$/) sub(/::[A-Z][^:]*$/, "", k)
+    return k
+}
 # Declaration kind for a header tag: the keyword if the line declares its group
 # (a mod/struct/enum/trait/union), else empty.
 function decl_kind(s,   t) {
@@ -1710,28 +1724,34 @@ END {
     for (i = 1; i <= n; i++) {
         s = buf[i]
         if (mode == "changed") {
-            if (s ~ /^  - /) { sig = s; sub(/^  - /, "", sig); ckey = group_key(sig); dk = decl_kind(sig); mk = member_kind(sig) }
+            if (s ~ /^  - /) { sig = s; sub(/^  - /, "", sig); ctk = group_key(sig); dk = decl_kind(sig); mk = member_kind(sig) }
             else { dk = ""; mk = "" }
-            gk[i] = ckey
+            tk = ctk
         } else {
-            gk[i] = group_key(s)
+            tk = group_key(s)
             dk = decl_kind(s)
             mk = member_kind(s)
         }
-        if (dk != "") gkind[gk[i]] = dk
-        if (mk != "" && !(gk[i] in gkindw)) gkindw[gk[i]] = mk
+        gk[i] = (level == "mod") ? mod_of(tk) : tk
+        if (level == "type") {
+            if (dk != "") gkind[gk[i]] = dk
+            if (mk != "" && !(gk[i] in gkindw)) gkindw[gk[i]] = mk
+        }
     }
     # Pass 2: emit header records (key + kind) and item records, eliding the
     # shared module prefix (the key minus its last segment) from each item.
     first = 1; prev = ""; mp = ""
     for (i = 1; i <= n; i++) {
         if (first || gk[i] != prev) {
-            k = gkind[gk[i]]
-            if (k == "") k = gkindw[gk[i]]
-            if (k == "") k = fallback_kind(gk[i])
+            if (level == "type") {
+                k = gkind[gk[i]]
+                if (k == "") k = gkindw[gk[i]]
+                if (k == "") k = fallback_kind(gk[i])
+            } else k = ""
             print "H\t" gk[i] "\t" k
             prev = gk[i]; first = 0
-            mp = gk[i]; sub(/::[^:]*$/, "", mp)
+            if (level == "mod") mp = gk[i]
+            else { mp = gk[i]; sub(/::[^:]*$/, "", mp) }
         }
         disp = buf[i]
         if (mp != "") gsub(mp "::", "", disp)
@@ -1739,14 +1759,15 @@ END {
     }
 }'
 
-# Render one diff section (kind = removed|added|changed). With grouping on
-# (default), items are clustered under a dim group-key header; with --flat the
-# original flat list is printed verbatim.
+# Render one diff section (kind = removed|added|changed). Per $group_mode:
+# `mod` (default) clusters items under their owning module, `type` clusters
+# under their owning type with a kind tag, and `flat` prints the ungrouped,
+# fully-qualified list. Grouped modes elide the shared module prefix.
 render_items() {
     local buffer=$1 kind=$2 mode=plain
     [ "$kind" = changed ] && mode=changed
 
-    if ! $group; then
+    if [ "$group_mode" = flat ]; then
         while IFS= read -r line; do
             [ -z "$line" ] && continue
             case "$kind" in
@@ -1788,7 +1809,7 @@ render_items() {
             esac
             ;;
         esac
-    done < <(printf '%s' "$buffer" | awk -v mode="$mode" "$GROUP_AWK")
+    done < <(printf '%s' "$buffer" | awk -v mode="$mode" -v level="$group_mode" "$GROUP_AWK")
 }
 
 has_breaking=false

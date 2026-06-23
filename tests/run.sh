@@ -104,39 +104,44 @@ assert_eq "$rc" 1 "--fetch with no remote: exit 1"
 assert_contains "$out" "no remote found" "--fetch with no remote: clear error"
 rm -rf "$repo"
 
-# 6) Grouping: a type's items cluster under a dim type/module header by default;
-#    --flat prints the flat list with no header.
+# 6) Default grouping is by MODULE: items cluster under a module header with no
+#    kind tag, and the shared module prefix is elided from each item.
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Widget;\nimpl Widget {\n    pub fn new() -> Self { Widget }\n    pub fn run(&self) {}\n}' 'add Widget type')
 out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 )
-if printf '%s\n' "$out" | grep -qE '^ +ziff_fixture::Widget +\(struct\)$'; then
-    ok "grouping: header has type path + kind tag"
+if printf '%s\n' "$out" | grep -qE '^ +ziff_fixture$'; then
+    ok "mod grouping (default): bare module header, no kind tag"
 else
-    bad "grouping: expected 'ziff_fixture::Widget  (struct)' header"
+    bad "mod grouping: expected a bare 'ziff_fixture' module header"
 fi
-assert_contains "$out" "+ pub struct Widget" "grouping: item shown prefix-elided"
-if printf '%s\n' "$out" | grep -qF '+ pub struct ziff_fixture::Widget'; then
-    bad "grouping: item should not repeat the full module path"
+assert_contains "$out" "+ pub struct Widget" "mod grouping: shared module prefix elided"
+
+# 6b) --by-type groups by the owning type and tags the header with its kind.
+byt=$( cd "$repo" && "$ZIFF" --by-type "$base" "$head" 2>&1 )
+if printf '%s\n' "$byt" | grep -qE '^ +ziff_fixture::Widget +\(struct\)$'; then
+    ok "--by-type: type header with (struct) tag"
 else
-    ok "grouping: shared module prefix elided from item"
+    bad "--by-type: expected 'ziff_fixture::Widget  (struct)' header"
 fi
+# A pre-existing type (no declaration in the diff) still gets a fallback (type) tag.
+head2=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Widget;\nimpl Widget {\n    pub fn new() -> Self { Widget }\n    pub fn run(&self) {}\n    pub fn extra(&self) {}\n}' 'add a method to existing Widget')
+byt2=$( cd "$repo" && "$ZIFF" --by-type "$head" "$head2" 2>&1 )
+if printf '%s\n' "$byt2" | grep -qE '^ +ziff_fixture::Widget +\(type\)$'; then
+    ok "--by-type: undeclared type gets fallback (type) tag"
+else
+    bad "--by-type: expected 'ziff_fixture::Widget  (type)' for undeclared type"
+fi
+
+# 6c) --flat keeps fully-qualified paths and emits no indented group header.
 flat=$( cd "$repo" && "$ZIFF" --flat "$base" "$head" 2>&1 )
 assert_contains "$flat" "pub struct ziff_fixture::Widget" "--flat: keeps fully-qualified paths"
-if printf '%s\n' "$flat" | grep -qE '^ +ziff_fixture::Widget +\(struct\)$'; then
+# A group header is an indented path alone (optionally a kind tag); the per-crate
+# summary line (which has counts after the name) must not be mistaken for one.
+if printf '%s\n' "$flat" | grep -qE '^ +ziff_fixture(::[A-Za-z0-9_]+)*( +\([a-z]+\))?$'; then
     bad "--flat: should not emit a group header"
 else
     ok "--flat: no group header"
-fi
-
-# 6b) A pre-existing type (declared in the baseline, only a method added) still
-#     gets a header tag — the generic (type), since no declaration is in the diff.
-head2=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Widget;\nimpl Widget {\n    pub fn new() -> Self { Widget }\n    pub fn run(&self) {}\n    pub fn extra(&self) {}\n}' 'add a method to existing Widget')
-out2=$( cd "$repo" && "$ZIFF" "$head" "$head2" 2>&1 )
-if printf '%s\n' "$out2" | grep -qE '^ +ziff_fixture::Widget +\(type\)$'; then
-    ok "grouping: pre-existing type gets a fallback (type) tag"
-else
-    bad "grouping: expected 'ziff_fixture::Widget  (type)' for an undeclared type"
 fi
 rm -rf "$repo"
 
