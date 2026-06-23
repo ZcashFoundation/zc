@@ -85,8 +85,8 @@
 #   --changelog      Emit a librustzcash-style changelog (markdown) on stdout
 #                    instead of the diff: one `## <crate>` section per changed
 #                    crate, with `### Added`/`### Changed`/`### Removed` lists
-#                    grouped under their owning type (own-crate paths made
-#                    crate-relative, foreign-type paths kept in full). Per-crate
+#                    grouped under their owning type, with full crate-qualified
+#                    paths on headers (lrz style). Per-crate
 #                    dependency changes are folded in too: internal workspace
 #                    bumps and external `Migrated to ...` lines under Changed,
 #                    dropped deps under Removed. Other output is suppressed.
@@ -1980,8 +1980,9 @@ TRAIT_MAP_JQ='
 
 # ── changelog generation (--changelog) ─────────────────────────────────
 # Emits one diff section as librustzcash-style markdown bullets: items grouped
-# under their owning type (`- `module::Type`:` + indented members), bare types
-# inline, own-crate paths made crate-relative, foreign-type paths kept in full.
+# under their owning type (`- `crate::module::Type`:` + indented members), bare
+# types inline. Headers keep full crate-qualified paths (lrz style); members are
+# shown relative to their header.
 # Trait-impl associated items (methods, assoc types/consts) are instead grouped
 # under an `impl <Trait> for <Self>` header. The trait is recovered from the
 # crate rustdoc JSON (`traitfile`, built by dump_trait_map) because the unchanged
@@ -2036,7 +2037,7 @@ function group_key(s,   p, isdecl) {
 }
 function qual_path(s,   p) {
     gsub(/^#\[[^]]*\] +/, "", s)
-    if (s ~ /^impl /) { if (crate_prefix != "") gsub(crate_prefix "::", "", s); return s }
+    if (s ~ /^impl /) return s
     sub(/^pub +/, "", s)
     sub(/^(const +|async +|unsafe +)*/, "", s); sub(/^(fn|static|type|use|mod|struct|enum|trait|union) +/, "", s)
     p = s
@@ -2046,7 +2047,9 @@ function qual_path(s,   p) {
     return p
 }
 function disp(path) {
-    if (crate_prefix != "" && index(path, crate_prefix "::") == 1) return substr(path, length(crate_prefix) + 3)
+    # librustzcash style: keep full crate-qualified paths on group headers (the
+    # crate prefix is not stripped). Members are still shown relative to their
+    # group header by member_disp.
     return path
 }
 function member_disp(qp, gk) {
