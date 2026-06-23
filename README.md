@@ -56,13 +56,13 @@ chmod +x ziff
 ## Usage
 
 ```sh
-ziff                      # dirty tree: HEAD -> working tree; clean: parent-branch -> HEAD
-ziff main                 # compare against main (-> working tree if dirty, else HEAD)
-ziff v4.1.0 v4.2.0        # compare two arbitrary refs
-ziff --fetch              # fetch the upstream main tip first, then diff against it
-ziff --with-lock          # include the transitive Cargo.lock diff
+ziff                       # dirty tree: HEAD -> working tree; clean: parent-branch -> HEAD
+ziff main                  # compare against main (-> working tree if dirty, else HEAD)
+ziff v4.1.0 v4.2.0         # compare two arbitrary refs
+ziff --fetch               # fetch the upstream main tip first, then diff against it
+ziff --with-lock           # include the transitive Cargo.lock diff
 ziff --with-values main    # also flag const/static value + doc changes
-ziff --json main          # machine-readable output for CI
+ziff --json main           # machine-readable output for CI
 ```
 
 Run `ziff --help` for the full option and output reference.
