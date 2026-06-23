@@ -104,6 +104,25 @@ assert_eq "$rc" 1 "--fetch with no remote: exit 1"
 assert_contains "$out" "no remote found" "--fetch with no remote: clear error"
 rm -rf "$repo"
 
+# 6) Grouping: a type's items cluster under a dim type/module header by default;
+#    --flat prints the flat list with no header.
+repo=$(new_repo 'pub fn placeholder() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Widget;\nimpl Widget {\n    pub fn new() -> Self { Widget }\n    pub fn run(&self) {}\n}' 'add Widget type')
+out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 )
+if printf '%s\n' "$out" | grep -qE '^ +ziff_fixture::Widget$'; then
+    ok "grouping: type header present by default"
+else
+    bad "grouping: expected a bare 'ziff_fixture::Widget' group header"
+fi
+flat=$( cd "$repo" && "$ZIFF" --flat "$base" "$head" 2>&1 )
+if printf '%s\n' "$flat" | grep -qE '^ +ziff_fixture::Widget$'; then
+    bad "--flat: should not emit a bare group header"
+else
+    ok "--flat: no group header"
+fi
+rm -rf "$repo"
+
 echo ""
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]

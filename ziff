@@ -52,6 +52,12 @@
 # OPTIONS
 #   -h, --help       Print this help message and exit.
 #   --with-lock      Also diff Cargo.lock for transitive dep changes.
+#   --flat           Don't group the per-crate API items. By default, items in
+#                    each Removed/Changed/Added list are clustered under a
+#                    dim header for the type or module that owns them (a type
+#                    declaration heads its own group alongside its methods,
+#                    fields, variants, and impls). --flat prints the original
+#                    one-item-per-line list instead.
 #   --fetch[=<remote>]
 #                    Fetch the baseline branch from <remote> before comparing,
 #                    so a stale local `main` can't skew the diff (e.g. when
@@ -269,7 +275,7 @@ ziff — diff the public API and dependencies of a Rust workspace between two gi
 
 Usage: ziff [options] [<baseline> [<head>]]
 
-Options: --with-lock  --fetch[=<remote>]  --with-values  --json  -h/--help
+Options: --with-lock  --fetch[=<remote>]  --with-values  --flat  --json  -h/--help
 
 Piped execution shows only this short help. For the full reference, grab a copy:
   curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff -o ziff
@@ -282,6 +288,7 @@ with_values=false
 json_mode=false
 do_fetch=false
 fetch_remote=""
+group=true
 while [ $# -gt 0 ]; do
     case "$1" in
     -h | --help)
@@ -290,6 +297,10 @@ while [ $# -gt 0 ]; do
         ;;
     --with-lock)
         with_lock=true
+        shift
+        ;;
+    --flat)
+        group=false
         shift
         ;;
     --fetch)
@@ -1634,6 +1645,89 @@ fi
 
 # ── detailed diffs ────────────────────────────────────────────────────
 
+# Group key for a public-API signature: the type or module that owns the item,
+# so a type's declaration and its methods/fields/variants/impls cluster under
+# one header. Generic params are stripped; for `impl … for T` the key is `T`;
+# for a member (fn/const/field/variant/…) the trailing `::leaf` is dropped; a
+# type/mod declaration keeps its full path (so it heads its own group).
+GROUP_AWK='
+function group_key(s,   p, isdecl) {
+    isdecl = 0
+    gsub(/^#\[[^]]*\] +/, "", s)
+    while (s ~ /<[^<>]*>/) gsub(/<[^<>]*>/, "", s)
+    if (s ~ /^impl /) {
+        sub(/^impl +/, "", s)
+        if (s ~ / for /) sub(/^.* for /, "", s)
+        p = s; isdecl = 1
+    } else {
+        sub(/^pub +/, "", s)
+        if (s ~ /^(mod|struct|enum|trait|union) /) {
+            sub(/^(mod|struct|enum|trait|union) +/, "", s); isdecl = 1
+        } else {
+            sub(/^(async +fn|fn|const|static|type|use) +/, "", s)
+        }
+        p = s
+    }
+    sub(/[ (=].*/, "", p)
+    sub(/:$/, "", p)
+    if (!isdecl && p ~ /::/) sub(/::[^:]+$/, "", p)
+    return p
+}
+/^[[:space:]]*$/ { next }
+{
+    if (mode == "changed") {
+        if ($0 ~ /^  - /) { sig = $0; sub(/^  - /, "", sig); curkey = group_key(sig) }
+        print curkey "\t" $0
+    } else {
+        print group_key($0) "\t" $0
+    }
+}'
+
+# Render one diff section (kind = removed|added|changed). With grouping on
+# (default), items are clustered under a dim group-key header; with --flat the
+# original flat list is printed verbatim.
+render_items() {
+    local buffer=$1 kind=$2 mode=plain
+    [ "$kind" = changed ] && mode=changed
+
+    if ! $group; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            case "$kind" in
+            removed) echo "    ${RED}- ${line}${RESET}" ;;
+            added) echo "    ${GREEN}+ ${line}${RESET}" ;;
+            changed)
+                case "$line" in
+                "  - "*) echo "    ${RED}${line#  }${RESET}" ;;
+                "  + "*) echo "    ${GREEN}${line#  }${RESET}" ;;
+                *) echo "    $line" ;;
+                esac ;;
+            esac
+        done <<<"$buffer"
+        return
+    fi
+
+    local prev="" key line
+    while IFS=$'\t' read -r key line; do
+        [ -z "$line" ] && continue
+        if [ "$key" != "$prev" ]; then
+            [ -n "$prev" ] && echo ""
+            echo "    ${DIM}${key:-(other)}${RESET}"
+            prev="$key"
+        fi
+        case "$kind" in
+        removed) echo "      ${RED}- ${line}${RESET}" ;;
+        added) echo "      ${GREEN}+ ${line}${RESET}" ;;
+        changed)
+            case "$line" in
+            "  - "*) echo "      ${RED}${line#  }${RESET}" ;;
+            "  + "*) echo "      ${GREEN}${line#  }${RESET}" ;;
+            *) echo "      $line" ;;
+            esac ;;
+        esac
+    done < <(printf '%s' "$buffer" | awk -v mode="$mode" "$GROUP_AWK")
+}
+
 has_breaking=false
 
 for i in "${!crate_names[@]}"; do
@@ -1650,32 +1744,19 @@ for i in "${!crate_names[@]}"; do
     if [ "$r" -gt 0 ]; then
         echo ""
         echo "  ${RED}Removed ($r):${RESET}"
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            echo "    ${RED}- ${line}${RESET}"
-        done <<<"${crate_removed_lines[$i]}"
+        render_items "${crate_removed_lines[$i]}" removed
     fi
 
     if [ "$c" -gt 0 ]; then
         echo ""
         echo "  ${YELLOW}Changed ($c):${RESET}"
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            case "$line" in
-            "  - "*) echo "    ${RED}${line#  }${RESET}" ;;
-            "  + "*) echo "    ${GREEN}${line#  }${RESET}" ;;
-            *) echo "    $line" ;;
-            esac
-        done <<<"${crate_changed_lines[$i]}"
+        render_items "${crate_changed_lines[$i]}" changed
     fi
 
     if [ "$a" -gt 0 ]; then
         echo ""
         echo "  ${GREEN}Added ($a):${RESET}"
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            echo "    ${GREEN}+ ${line}${RESET}"
-        done <<<"${crate_added_lines[$i]}"
+        render_items "${crate_added_lines[$i]}" added
     fi
 done
 
