@@ -82,6 +82,12 @@
 #                    rustdoc JSON. Catches changes cargo-public-api can't see
 #                    (it is signature-only). Needs a nightly toolchain and
 #                    roughly doubles the rustdoc work, hence opt-in.
+#   --changelog      Emit a librustzcash-style changelog (markdown) on stdout
+#                    instead of the diff: one `## <crate>` section per changed
+#                    crate, with `### Added`/`### Changed`/`### Removed` lists
+#                    grouped under their owning type (own-crate paths made
+#                    crate-relative, foreign-type paths kept in full). Other
+#                    output is suppressed.
 #   --json           Emit a machine-readable JSON summary on stdout (all
 #                    human-readable output is suppressed). Schema:
 #                      {
@@ -284,7 +290,7 @@ ziff — diff the public API and dependencies of a Rust workspace between two gi
 
 Usage: ziff [options] [<baseline> [<head>]]
 
-Options: --with-lock  --fetch[=<remote>]  --with-values  --by-type  --flat  --json  -h/--help
+Options: --with-lock  --fetch[=<remote>]  --with-values  --by-type  --flat  --changelog  --json  -h/--help
 
 Piped execution shows only this short help. For the full reference, grab a copy:
   curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff -o ziff
@@ -295,6 +301,7 @@ EOF
 with_lock=false
 with_values=false
 json_mode=false
+changelog_mode=false
 do_fetch=false
 fetch_remote=""
 # Per-crate item grouping: mod (default) clusters by owning module; type
@@ -335,6 +342,10 @@ while [ $# -gt 0 ]; do
         json_mode=true
         shift
         ;;
+    --changelog)
+        changelog_mode=true
+        shift
+        ;;
     --)
         shift
         break
@@ -349,9 +360,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# In JSON mode, silence colours and redirect human-readable output to
-# /dev/null so the final JSON document is the only thing on stdout.
-if $json_mode; then
+# In JSON or changelog mode, silence colours and redirect human-readable output
+# to /dev/null so the generated document is the only thing on stdout (fd 3).
+if $json_mode || $changelog_mode; then
     RED="" GREEN="" YELLOW="" BOLD="" DIM="" RESET=""
     exec 3>&1 >/dev/null
 fi
@@ -1842,6 +1853,87 @@ END {
     }
 }'
 
+# ── changelog generation (--changelog) ─────────────────────────────────
+# Emits one diff section as librustzcash-style markdown bullets: items grouped
+# under their owning type (`- `module::Type`:` + indented members), bare types
+# inline, own-crate paths made crate-relative, foreign-type paths kept in full.
+# `group_key` mirrors GROUP_AWK; `qual_path` is the same path extraction WITHOUT
+# the leaf-drop (so it keeps the member name), or the verbatim `impl …` line.
+CHANGELOG_AWK='
+function group_key(s,   p, isdecl) {
+    isdecl = 0
+    gsub(/^#\[[^]]*\] +/, "", s)
+    while (s ~ /<[^<>]*>/) gsub(/<[^<>]*>/, "", s)
+    if (s ~ /^impl /) {
+        sub(/^impl +/, "", s)
+        if (s ~ / for /) sub(/^.* for /, "", s)
+        p = s; isdecl = 1
+    } else {
+        sub(/^pub +/, "", s)
+        if (s ~ /^(mod|struct|enum|trait|union) /) {
+            sub(/^(mod|struct|enum|trait|union) +/, "", s); isdecl = 1
+        } else {
+            sub(/^(async +fn|fn|const|static|type|use) +/, "", s)
+        }
+        p = s
+    }
+    sub(/[ (=].*/, "", p)
+    sub(/:$/, "", p)
+    if (!isdecl && p ~ /::/) sub(/::[^:]+$/, "", p)
+    return p
+}
+function qual_path(s,   p) {
+    gsub(/^#\[[^]]*\] +/, "", s)
+    if (s ~ /^impl /) { if (crate_prefix != "") gsub(crate_prefix "::", "", s); return s }
+    sub(/^pub +/, "", s)
+    sub(/^(async +fn|fn|const|static|type|use|mod|struct|enum|trait|union) +/, "", s)
+    p = s
+    while (p ~ /<[^<>]*>/) gsub(/<[^<>]*>/, "", p)
+    sub(/[ (=].*/, "", p)
+    sub(/:$/, "", p)
+    return p
+}
+function disp(path) {
+    if (crate_prefix != "" && index(path, crate_prefix "::") == 1) return substr(path, length(crate_prefix) + 3)
+    return path
+}
+function member_disp(qp, gk) {
+    if (qp ~ /^impl /) return qp
+    if (index(qp, gk "::") == 1) return substr(qp, length(gk) + 3)
+    return disp(qp)
+}
+/^[[:space:]]*$/ { next }
+{ buf[++n] = $0 }
+END {
+    for (i = 1; i <= n; i++) {
+        s = buf[i]
+        if (mode == "changed") { if (s !~ /^  - /) continue; sub(/^  - /, "", s) }
+        gk = group_key(s); qp = qual_path(s)
+        if ((gk SUBSEP qp) in seenitem) continue   # cargo-public-api dupes some impls
+        seenitem[gk SUBSEP qp] = 1
+        if (!(gk in seen)) { seen[gk] = 1; order[++norder] = gk }
+        members[gk, ++mcnt[gk]] = qp
+    }
+    for (o = 1; o <= norder; o++) {
+        gk = order[o]
+        nd = 0
+        for (k = 1; k <= mcnt[gk]; k++) if (members[gk, k] != gk) ndm[++nd] = members[gk, k]
+        if (nd == 0) { print "- `" disp(gk) "`"; delete ndm; continue }
+        print "- `" disp(gk) "`:"
+        for (k = 1; k <= nd; k++) print "  - `" member_disp(ndm[k], gk) "`"
+        delete ndm
+    }
+}'
+
+# Emit per-section changelog markdown for buffer $1 (kind $2, crate prefix $3).
+# Prints nothing when the buffer is empty.
+render_changelog() {
+    local buffer=$1 kind=$2 crate_prefix=$3 mode=plain
+    [ "$kind" = changed ] && mode=changed
+    [ -z "$buffer" ] && return
+    printf '%s' "$buffer" | awk -v mode="$mode" -v crate_prefix="$crate_prefix" "$CHANGELOG_AWK"
+}
+
 # Render one diff section (kind = removed|added|changed). Per $group_mode:
 # `mod` (default) clusters items under their owning module, `type` clusters
 # under their owning type with a kind tag, and `flat` prints the ungrouped,
@@ -1935,6 +2027,38 @@ if [ "$group_mode" != flat ]; then
 fi
 
 has_breaking=false
+
+# ── changelog output (--changelog) ─────────────────────────────────────
+# Reuse the per-crate diff buffers to emit librustzcash-style markdown to the
+# saved stdout (fd 3), one section per changed crate, then stop. (Trait
+# attribution from rustdoc JSON is layered onto this in a later pass.)
+if $changelog_mode; then
+    {
+        for i in "${!crate_names[@]}"; do
+            r="${crate_removed[$i]}" c="${crate_changed[$i]}" a="${crate_added[$i]}"
+            [ $((r + c + a)) -eq 0 ] && continue
+            pfx="${crate_names[$i]//-/_}"
+            echo "## ${crate_names[$i]}"
+            echo ""
+            if [ "$a" -gt 0 ]; then
+                echo "### Added"
+                render_changelog "${crate_added_lines[$i]}" added "$pfx"
+                echo ""
+            fi
+            if [ "$c" -gt 0 ]; then
+                echo "### Changed"
+                render_changelog "${crate_changed_lines[$i]}" changed "$pfx"
+                echo ""
+            fi
+            if [ "$r" -gt 0 ]; then
+                echo "### Removed"
+                render_changelog "${crate_removed_lines[$i]}" removed "$pfx"
+                echo ""
+            fi
+        done
+    } >&3
+    exit 0
+fi
 
 for i in "${!crate_names[@]}"; do
     r="${crate_removed[$i]}"

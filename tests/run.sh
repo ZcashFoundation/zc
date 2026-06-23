@@ -235,6 +235,18 @@ else
 fi
 rm -rf "$ws"
 
+# 6h) --changelog emits librustzcash-style markdown: per-crate heading, ### Added,
+#     items grouped under their type with bare member names.
+repo=$(new_repo 'pub fn placeholder() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Widget;\nimpl Widget { pub fn new() -> Self { Widget } pub fn run(&self) {} }' 'add Widget')
+out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+assert_contains "$out" "## ziff_fixture" "--changelog: per-crate heading"
+assert_contains "$out" "### Added" "--changelog: Added section"
+assert_contains "$out" "- \`Widget\`:" "--changelog: type group header (crate-relative)"
+assert_contains "$out" "- \`new\`" "--changelog: member shown as a bare name"
+rm -rf "$repo"
+
 echo ""
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]
