@@ -78,7 +78,9 @@ crate, with `### Added` / `### Changed` / `### Removed` lists.
 - Added/removed API items are grouped under their owning type, with own-crate
   paths made crate-relative (e.g. `error::TransactionError`) and foreign-type
   paths kept in full. Several members of one type are brace-grouped onto a single
-  bullet, lrz-style: `` - `OutPoint::{NULL, new, read, write}` ``.
+  bullet, lrz-style: `` - `OutPoint::{NULL, new, read, write}` ``. When that brace
+  line would exceed ~100 chars, it breaks onto a `` `Type`: `` header with one
+  2-space-indented `` - `member` `` per line, again matching librustzcash.
 - Changed items show the old → new signature, so the entry says *what* changed
   (e.g. a return type going from `Result<Self, E>` to `Self`) rather than just
   naming the item.

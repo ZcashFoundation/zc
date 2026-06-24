@@ -255,6 +255,21 @@ assert_contains "$out" "### Added" "--changelog: Added section"
 assert_contains "$out" "- \`Widget::{new, run}\`" "--changelog: type members brace-grouped on one line"
 rm -rf "$repo"
 
+# 6h2) --changelog wraps an over-wide brace group lrz-style: when `Type::{...}`
+#      would exceed the line budget, it breaks onto a `Type:` header with one
+#      2-space-indented member per line instead of one long brace line.
+repo=$(new_repo 'pub fn placeholder() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Verifier;\nimpl Verifier { pub fn check_cross_address_disabled(&self) {} pub fn enforce_nullifier_uniqueness(&self) {} pub fn validate_ironwood_proof_size(&self) {} pub fn validate_orchard_value_balance(&self) {} }' 'add Verifier')
+out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+assert_contains "$out" "- \`Verifier\`:" "--changelog: over-wide group uses a type header"
+assert_contains "$out" "  - \`validate_ironwood_proof_size\`" "--changelog: over-wide group members indented as sub-bullets"
+case "$out" in
+    *'Verifier::{'*) bad "--changelog: over-wide group should not stay on one brace line" ;;
+    *) ok "--changelog: over-wide group is not kept inline" ;;
+esac
+rm -rf "$repo"
+
 # 6i) --changelog documents per-crate dependency changes: an internal workspace
 #     crate bump becomes a "dependency bumped to" line under ### Changed, and a
 #     dropped dependency becomes a "dependency." line under ### Removed. Uses

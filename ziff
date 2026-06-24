@@ -2058,6 +2058,10 @@ function impl_group(s, gk0, qp,   body, tp, sp, ts, mem, tr) {
     return "impl " tr " for " disp(gk0) self_generics(s, ts)
 }
 BEGIN {
+    # Max width for a one-line brace group `- ` + "`type::{a, b, ...}`"; past
+    # this, librustzcash breaks the group onto a `type:` header with one
+    # 2-space-indented `  - ` member per line, so we do the same.
+    WIDTH = 100
     # Trait methods implied by the impl itself — listing them under an
     # `impl Trait for Self` header is noise (an `impl From` only has `from`).
     bn = split("from into try_from try_into clone clone_from fmt hash eq ne cmp partial_cmp lt le gt ge default deref deref_mut as_ref as_mut borrow borrow_mut drop serialize deserialize into_iter next", bsplit, " ")
@@ -2137,7 +2141,12 @@ END {
                 else {                                  # brace-group the type members
                     line = ""
                     for (k = 1; k <= nd; k++) line = line (k > 1 ? ", " : "") member_disp(ndm[k], gk)
-                    print "- `" hdr "::{" line "}`"
+                    oneline = "- `" hdr "::{" line "}`"
+                    if (length(oneline) <= WIDTH) print oneline
+                    else {                               # too wide: header + indented members
+                        print "- `" hdr "`:"
+                        for (k = 1; k <= nd; k++) print "  - `" member_disp(ndm[k], gk) "`"
+                    }
                 }
             }
             delete ndm
