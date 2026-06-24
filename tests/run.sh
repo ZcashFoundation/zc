@@ -113,6 +113,27 @@ esac
 assert_contains "$out" "merge-base(main, HEAD)" "merge-base default: labels the baseline"
 rm -rf "$repo"
 
+# 5b) The default baseline ignores a branch's OWN remote: a feature branch pushed
+#     with `git push -u` tracks `origin/<itself>`, which is useless to diff
+#     against (same commit). Detection must fall through to `main`, not compare
+#     the branch to itself (which would yield an empty diff).
+repo=$(new_repo 'pub fn foo() {}')
+git -C "$repo" branch -M main
+git -C "$repo" checkout -q -b feature
+commit_lib "$repo" $'pub fn foo() {}\npub fn feature_fn() {}' 'feature work' >/dev/null
+git -C "$repo" checkout -q main
+commit_lib "$repo" $'pub fn foo() {}\npub fn upstream_fn() {}' 'main advances after branch' >/dev/null
+git -C "$repo" checkout -q feature
+# simulate `git push -u`: feature tracks origin/feature, pointing at its own tip
+git -C "$repo" remote add origin "$repo"
+git -C "$repo" update-ref refs/remotes/origin/feature "$(git -C "$repo" rev-parse feature)"
+git -C "$repo" config branch.feature.remote origin
+git -C "$repo" config branch.feature.merge refs/heads/feature
+out=$( cd "$repo" && "$ZIFF" 2>&1 ); rc=$?
+assert_contains "$out" "merge-base(main, HEAD)" "self-upstream: baseline falls through to main"
+assert_contains "$out" "feature_fn" "self-upstream: still shows the branch's own addition"
+rm -rf "$repo"
+
 # 6) Default grouping is a MODULE > TYPE > member hierarchy: items cluster under
 #    their module, then under a type sub-header (tagged with its kind), with the
 #    type prefix factored out of each member.

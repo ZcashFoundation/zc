@@ -377,6 +377,14 @@ detect_parent_branch() {
         return
     fi
     upstream=$(git rev-parse --abbrev-ref "${current}@{upstream}" 2>/dev/null || true)
+    # A feature branch usually tracks its OWN remote (e.g. `origin/<this-branch>`,
+    # set by `git push -u`). That's no use as a diff baseline — comparing a branch
+    # to itself yields nothing — so ignore a same-named upstream and fall through
+    # to `main`. Only a DIFFERENTLY-named upstream (e.g. a release branch a feature
+    # tracks) is a real parent. `${upstream#*/}` strips the leading `<remote>/`.
+    if [ -n "$upstream" ] && [ "${upstream#*/}" = "$current" ]; then
+        upstream=""
+    fi
     # Prefer the upstream ref verbatim (e.g. `origin/release-X`); fall back to
     # the `origin/`-stripped name only if it resolves locally, else `main`.
     # Returning a bare name that doesn't exist locally would abort the run when
