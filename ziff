@@ -1998,24 +1998,52 @@ TRAIT_MAP_JQ='
 # `group_key` mirrors GROUP_AWK; `qual_path` keeps the member name (no leaf-drop).
 CHANGELOG_AWK='
 function last_seg(p,   a, k) { while (p ~ /<[^<>]*>/) gsub(/<[^<>]*>/, "", p); k = split(p, a, "::"); return a[k] }
-function shorten_inner_gen(p,   pre, ins, post) {
-    if (match(p, /<[^<>]*>/)) {
-        pre = substr(p, 1, RSTART - 1); ins = substr(p, RSTART, RLENGTH); post = substr(p, RSTART + RLENGTH)
-        gsub(/[A-Za-z_][A-Za-z0-9_]*::/, "", ins)
-        return pre ins post
+# The first balanced `<...>` in p (handles nested generics like `Option<X>`),
+# or "" if there is none. match(/<[^<>]*>/) only finds non-nested spans.
+function outer_gen(p,   st, i, depth, c) {
+    st = index(p, "<"); if (st == 0) return ""
+    depth = 0
+    for (i = st; i <= length(p); i++) {
+        c = substr(p, i, 1)
+        if (c == "<") depth++
+        else if (c == ">") { depth--; if (depth == 0) return substr(p, st, i - st + 1) }
+    }
+    return substr(p, st)
+}
+# Reduce every `a::b::c::D` path to its last two segments (one module + the name),
+# so a generic arg keeps just enough to disambiguate (`orchard::Nullifier`).
+function keep2(p,   s1, full, rest, fl) {
+    while (match(p, /[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*::/)) {
+        s1 = RSTART; full = substr(p, RSTART, RLENGTH); rest = full
+        sub(/^[A-Za-z_][A-Za-z0-9_]*::/, "", rest)
+        fl = length(full) - length(rest)
+        p = substr(p, 1, s1 - 1) substr(p, s1 + fl)
     }
     return p
 }
-function self_generics(s, ts,   m) {
-    if (match(s, ts "<[^<>]*>")) { m = substr(s, RSTART, RLENGTH); sub("^" ts, "", m); gsub(/[A-Za-z_][A-Za-z0-9_]*::/, "", m); return m }
-    return ""
+# Tidy a generic-argument string for display: drop lifetimes and shorten paths.
+function short_gen(g) {
+    gsub(/'\''[A-Za-z_][A-Za-z0-9_]* */, "", g)   # drop lifetimes (e.g. <"de"> on Deserialize)
+    gsub(/<>/, "", g); gsub(/< *, */, "<", g); gsub(/ *, *>/, ">", g)
+    return keep2(g)
 }
-# Trait short name keeping its own generics (paths inside shortened to last seg),
-# e.g. core::convert::From<zebra_chain::orchard::Nullifier> -> From<Nullifier>.
-function trait_disp(tp,   gen) {
-    gen = ""
-    if (match(tp, /<[^<>]*>/)) { gen = substr(tp, RSTART, RLENGTH); gsub(/[A-Za-z_][A-Za-z0-9_]*::/, "", gen); tp = substr(tp, 1, RSTART - 1) }
-    return last_seg(tp) gen
+function shorten_inner_gen(p,   g, st) {
+    g = outer_gen(p); if (g == "") return p
+    st = index(p, "<")
+    return substr(p, 1, st - 1) short_gen(g) substr(p, st + length(g))
+}
+function self_generics(s, ts,   st, p) {
+    st = index(s, ts "<"); if (st == 0) return ""
+    p = substr(s, st + length(ts))
+    return short_gen(outer_gen(p))
+}
+# Trait short name keeping its own generics (paths shortened to one module segment,
+# lifetimes dropped), e.g. core::convert::From<zebra_chain::orchard::Nullifier>
+# -> From<orchard::Nullifier>.
+function trait_disp(tp,   g, st) {
+    g = outer_gen(tp); if (g == "") return last_seg(tp)
+    st = index(tp, "<")
+    return last_seg(substr(tp, 1, st - 1)) short_gen(g)
 }
 function group_key(s,   p, isdecl) {
     isdecl = 0

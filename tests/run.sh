@@ -365,11 +365,22 @@ repo=$(new_repo 'pub struct Foo;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub struct Foo;\nimpl<\'a> From<&\'a u8> for Foo { fn from(_: &\'a u8) -> Self { Foo } }' 'add lifetime-param impl')
 out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
-assert_contains "$out" "impl From" "--changelog: impl<'a> recognized as an impl"
+assert_contains "$out" "impl From<&u8> for Foo" "--changelog: impl<'a> recognized; lifetime stripped"
 case "$out" in
 *'::impl`'* | *'- `impl`'*) bad "--changelog: impl<'a> must not collapse to a stray 'impl' member" ;;
-*) ok "--changelog: no stray 'impl' member from impl<'a>" ;;
+*"'a"*) bad "--changelog: lifetime param should be stripped from the impl header" ;;
+*) ok "--changelog: no stray 'impl' member / no lifetime from impl<'a>" ;;
 esac
+rm -rf "$repo"
+
+# 6u) Generic args keep one module segment (not just the last), and nested
+#     generics are extracted with balanced brackets: a local `sub::Bar` inside a
+#     `core::option::Option<...>` renders as `From<option::Option<sub::Bar>>`.
+repo=$(new_repo 'pub struct Foo;')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" $'pub struct Foo;\npub mod sub { pub struct Bar; }\nimpl From<core::option::Option<sub::Bar>> for Foo { fn from(_: core::option::Option<sub::Bar>) -> Self { Foo } }' 'add nested From')
+out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+assert_contains "$out" "impl From<option::Option<sub::Bar>> for Foo" "--changelog: keep one module segment + nested generics"
 rm -rf "$repo"
 
 # 6r) Boilerplate trait methods implied by the impl (here `from`) are not listed
