@@ -58,10 +58,9 @@ chmod +x ziff
 ## Usage
 
 ```sh
-ziff                       # dirty tree: HEAD -> working tree; clean: parent-branch -> HEAD
-ziff main                  # compare against main (-> working tree if dirty, else HEAD)
-ziff v4.1.0 v4.2.0         # compare two arbitrary refs
-ziff --fetch               # fetch the upstream main tip first, then diff against it
+ziff                       # dirty tree: HEAD -> working tree; clean: branch point with parent -> HEAD
+ziff main                  # compare against the branch point with main (-> working tree if dirty, else HEAD)
+ziff v4.1.0 v4.2.0         # compare two arbitrary refs (exact, no merge-base)
 ziff --with-lock           # include the transitive Cargo.lock diff
 ziff --with-values main    # also flag const/static value + doc changes
 ziff --json main           # machine-readable output for CI
@@ -104,13 +103,21 @@ It's a *draft* — review and curate before committing. Needs a `nightly`
 toolchain for the trait attribution (without one it falls back to plain
 type grouping).
 
-### `--fetch`
+### Baseline: the branch point, not the tip
 
-`--fetch[=<remote>]` pins the baseline to the *current* tip of a remote branch
-instead of a possibly-stale local one, so a comparison isn't fooled by upstream
-having moved on. If the fetch can't run (offline, or no SSH auth in a
-non-interactive shell), it falls back to the last-synced `<remote>/<branch>`
-tracking ref and warns with that ref's commit age.
+When you compare against a parent branch — the default, or a single explicit
+baseline like `ziff main` — ziff diffs from the **branch point** (the merge-base
+of that branch and your head), not the branch's current tip. So commits that
+landed on the parent *after* you branched off (or last merged from it) don't
+show up as spurious added/removed API, and any changelog built from the diff
+describes only what *your* branch changed.
+
+This is computed entirely from local history — no fetch needed, since any parent
+commit you merged is by definition already a local ancestor. And because
+`merge-base(X, HEAD) == X` whenever `X` is already an ancestor of your head, it's
+a no-op for tags and release commits (`ziff v4.2.0`) and only moves the baseline
+when the parent has genuinely advanced past your branch point. An explicit
+two-ref comparison (`ziff v4.1.0 v4.2.0`) is always taken literally.
 
 ## Requirements
 

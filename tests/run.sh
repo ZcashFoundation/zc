@@ -91,17 +91,26 @@ else
 fi
 rm -rf "$repo"
 
-# 5) --fetch with no remote fails fast with a clear error (no build needed).
-repo=$(mktemp -d)
-git -C "$repo" init -q
-git -C "$repo" config user.email t@t
-git -C "$repo" config user.name t
-: >"$repo/x"
-git -C "$repo" add -A
-git -C "$repo" commit -qm init
-out=$( cd "$repo" && "$ZIFF" --fetch 2>&1 ); rc=$?
-assert_eq "$rc" 1 "--fetch with no remote: exit 1"
-assert_contains "$out" "no remote found" "--fetch with no remote: clear error"
+# 5) The default baseline is the BRANCH POINT (merge-base with the parent), not
+#    the parent's tip: API changes merged onto the parent *after* we branched
+#    must not leak into our diff. Branch `feature` off `main`, add our own item,
+#    then advance `main` with an unrelated item; `ziff` (no args) on `feature`
+#    must show our addition and ignore main's post-branch change.
+repo=$(new_repo 'pub fn foo() {}')
+git -C "$repo" branch -M main
+git -C "$repo" checkout -q -b feature
+commit_lib "$repo" $'pub fn foo() {}\npub fn feature_fn() {}' 'feature work' >/dev/null
+git -C "$repo" checkout -q main
+commit_lib "$repo" $'pub fn foo() {}\npub fn upstream_fn() {}' 'upstream work after branch' >/dev/null
+git -C "$repo" checkout -q feature
+out=$( cd "$repo" && "$ZIFF" 2>&1 ); rc=$?
+assert_contains "$out" "feature_fn" "merge-base default: shows the branch's own addition"
+case "$out" in
+    *upstream_fn*) bad "merge-base default: leaked the parent's post-branch change (upstream_fn)" ;;
+    *) ok "merge-base default: excludes the parent's post-branch change" ;;
+esac
+# And the header should announce the merge-base baseline, not a branch tip.
+assert_contains "$out" "merge-base(main, HEAD)" "merge-base default: labels the baseline"
 rm -rf "$repo"
 
 # 6) Default grouping is a MODULE > TYPE > member hierarchy: items cluster under

@@ -38,13 +38,21 @@
 #   <head>        Git ref to compare to.
 #
 # DEFAULT BEHAVIOR (when <head> is not given)
-#   The script picks `head` based on whether the working tree is dirty:
+#   The script picks `head` based on whether the working tree is dirty, and —
+#   when comparing against a parent branch — diffs from the *branch point* (the
+#   merge-base of that branch and the head) rather than the branch's current
+#   tip, so commits merged onto the parent after you branched don't pollute the
+#   diff (or any changelog built from it):
 #     - 0 args, dirty:  head = working tree, baseline = HEAD
-#     - 0 args, clean:  head = HEAD,         baseline = parent branch (upstream
-#                                                         tracking ref, or 'main')
-#     - 1 arg,  dirty:  head = working tree, baseline = <arg>
-#     - 1 arg,  clean:  head = HEAD,         baseline = <arg>
-#     - 2 args:         head = <arg2>,       baseline = <arg1>
+#     - 0 args, clean:  head = HEAD,         baseline = merge-base(parent, HEAD)
+#                                            (parent = upstream tracking ref, or 'main')
+#     - 1 arg,  dirty:  head = working tree, baseline = merge-base(<arg>, HEAD)
+#     - 1 arg,  clean:  head = HEAD,         baseline = merge-base(<arg>, HEAD)
+#     - 2 args:         head = <arg2>,       baseline = <arg1>  (exact, no merge-base)
+#
+#   merge-base(X, HEAD) == X whenever X is already an ancestor of HEAD, so the
+#   branch point only differs from the ref when the branch has advanced past it.
+#   It is computed from local history — no network access needed.
 #
 #   "Working tree" includes both staged and unstaged changes plus any
 #   untracked files (so a brand-new .rs file shows as added API).
@@ -67,17 +75,6 @@
 #                    under a separate "trait impls on external types" section.
 #   --flat           Don't group at all; print the original flat,
 #                    fully-qualified, one-item-per-line list.
-#   --fetch[=<remote>]
-#                    Fetch the baseline branch from <remote> before comparing,
-#                    so a stale local `main` can't skew the diff (e.g. when
-#                    upstream has merged PRs since you branched). The baseline
-#                    argument is treated as a branch name (default `main`); the
-#                    remote is auto-detected (the remote your default branch
-#                    tracks, the sole remote, or upstream/origin) unless given. If the
-#                    fetch can't run here (offline, or no SSH auth in a
-#                    non-interactive shell such as a remote build host), it falls
-#                    back to the last-synced `<remote>/<branch>` tracking ref and
-#                    warns with that ref's commit age so staleness is visible.
 #   --with-values    Also diff public const/static values and doc text via
 #                    rustdoc JSON. Catches changes cargo-public-api can't see
 #                    (it is signature-only). Needs a nightly toolchain and
@@ -93,7 +90,7 @@
 #   --json           Emit a machine-readable JSON summary on stdout (all
 #                    human-readable output is suppressed). Schema:
 #                      {
-#                        baseline:     "<ref as given>",
+#                        baseline:     "<ref, or 'merge-base(<ref>, <head>)'>",
 #                        baseline_sha: "<short sha>",
 #                        head:         "<ref as given, or 'working tree'>",
 #                        head_sha:     "<short sha>",
@@ -121,15 +118,12 @@
 #
 # EXAMPLES
 #   ziff                     # if dirty: HEAD -> working tree
-#                                    # if clean: parent-branch -> HEAD
-#   ziff main                # if dirty: main -> working tree
-#                                    # if clean: main -> HEAD
-#   ziff v4.2.0              # if dirty: v4.2.0 -> working tree
-#                                    # if clean: v4.2.0 -> HEAD
-#   ziff v4.1.0 v4.2.0       # compare two arbitrary refs
+#                                    # if clean: branch point with parent -> HEAD
+#   ziff main                # diff against the branch point with main
+#                                    # (HEAD, or working tree if dirty)
+#   ziff v4.2.0              # diff against v4.2.0 (a tag/ancestor: exact)
+#   ziff v4.1.0 v4.2.0       # compare two arbitrary refs (exact, no merge-base)
 #   ziff --with-lock         # include transitive Cargo.lock diff
-#   ziff --fetch             # fetch the upstream main tip, then diff against it
-#   ziff --fetch=upstream main  # fetch upstream/main explicitly, then diff against it
 #   ziff --with-values main  # also flag const/static value + doc changes
 #   ziff --json main         # machine-readable output for CI
 #
@@ -292,7 +286,7 @@ ziff — diff the public API and dependencies of a Rust workspace between two gi
 
 Usage: ziff [options] [<baseline> [<head>]]
 
-Options: --with-lock  --fetch[=<remote>]  --with-values  --by-type  --flat  --changelog  --json  -h/--help
+Options: --with-lock  --with-values  --by-type  --flat  --changelog  --json  -h/--help
 
 Piped execution shows only this short help. For the full reference, grab a copy:
   curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff -o ziff
@@ -304,8 +298,6 @@ with_lock=false
 with_values=false
 json_mode=false
 changelog_mode=false
-do_fetch=false
-fetch_remote=""
 # Per-crate item grouping: mod (default) clusters by owning module; type
 # clusters by owning type (with kind tags); flat is the ungrouped list.
 group_mode="mod"
@@ -325,15 +317,6 @@ while [ $# -gt 0 ]; do
         ;;
     --by-type)
         group_mode="type"
-        shift
-        ;;
-    --fetch)
-        do_fetch=true
-        shift
-        ;;
-    --fetch=*)
-        do_fetch=true
-        fetch_remote="${1#--fetch=}"
         shift
         ;;
     --with-values)
@@ -377,7 +360,8 @@ fi
 # ── baseline detection ────────────────────────────────────────────────
 
 # Detect the parent branch to use when the user doesn't pass a baseline
-# AND the working tree is clean. Strategy, in order:
+# AND the working tree is clean. The returned ref is then reduced to its
+# merge-base with HEAD (see `reduce_to_merge_base`). Strategy, in order:
 #   1. If we're on 'main' (or HEAD is detached and there is no branch),
 #      use 'main' — comparing main to HEAD is the only useful default.
 #   2. Otherwise, if the current branch has an upstream tracking ref
@@ -406,89 +390,27 @@ detect_parent_branch() {
     fi
 }
 
-# ── remote baseline (--fetch) ──────────────────────────────────────────
+# ── merge-base reduction ───────────────────────────────────────────────
 #
-# With --fetch the baseline is the *current* tip of a remote branch rather than
-# whatever the local ref happens to point at. This avoids the trap where you
-# branch off `main`, upstream merges more PRs, and a stale local `main` makes
-# the diff (and any changelog or API review based on it) miss or misattribute
-# changes. The branch to fetch is the positional baseline arg if given, else
-# `main`; a leading `<remote>/` is stripped. `npos`/`pos1` are the captured
-# positional args (see "Argument parsing" below).
-
-# Name of the branch to fetch for the baseline.
-fetch_branch_name() {
-    local b prefix
-    if [ "${npos:-0}" -ge 1 ]; then b="$pos1"; else b="main"; fi
-    if [[ "$b" == */* ]]; then
-        prefix=${b%%/*}
-        if git remote | grep -qx "$prefix"; then b=${b#*/}; fi
-    fi
-    printf '%s' "$b"
-}
-
-# Pick the remote to fetch the baseline from. Order: explicit --fetch=<remote>;
-# a `<remote>/` prefix on the baseline arg; the remote the baseline branch (or
-# the local default branch — main/master) tracks; the sole remote if there is
-# only one; then the first existing of upstream / origin. Returns non-zero if
-# none can be determined (the caller then asks the user to pass --fetch=<remote>).
-detect_fetch_remote() {
-    local branch_arg=$1 branch=$2 prefix tracked b r n
-    if [ -n "$fetch_remote" ]; then printf '%s' "$fetch_remote"; return 0; fi
-    if [[ "$branch_arg" == */* ]]; then
-        prefix=${branch_arg%%/*}
-        if git remote | grep -qx "$prefix"; then printf '%s' "$prefix"; return 0; fi
-    fi
-    # The remote the baseline branch tracks, else the local default branch's.
-    for b in "$branch" main master; do
-        [ -z "$b" ] && continue
-        tracked=$(git config --get "branch.$b.remote" 2>/dev/null || true)
-        if [ -n "$tracked" ] && git remote | grep -qx "$tracked"; then
-            printf '%s' "$tracked"
-            return 0
-        fi
-    done
-    # If the repo has exactly one remote, use it regardless of its name.
-    n=$(git remote | wc -l)
-    if [ "$n" -eq 1 ]; then printf '%s' "$(git remote)"; return 0; fi
-    # Conventional upstream names.
-    for r in upstream origin; do
-        if git remote | grep -qx "$r"; then printf '%s' "$r"; return 0; fi
-    done
-    return 1
-}
-
-# Resolve the baseline against the remote. Sets globals `baseline` (to a commit
-# SHA) and `baseline_label` (e.g. `upstream/main`). Tries a live fetch first; if that
-# fails — offline, or no SSH auth in a non-interactive shell such as a remote
-# build host — it falls back to the last-synced `<remote>/<branch>` tracking ref
-# and warns with that ref's commit age so staleness is visible. Aborts only if
-# there is no tracking ref to fall back to.
-resolve_fetch_baseline() {
-    local branch remote when
-    branch=$(fetch_branch_name)
-    if ! remote=$(detect_fetch_remote "${pos1:-$branch}" "$branch"); then
-        echo "${RED}error:${RESET} --fetch: no remote found; pass --fetch=<remote> (or add a remote)" >&2
-        exit 1
-    fi
-    baseline_label="$remote/$branch"
-    # BatchMode + no terminal prompt + a connect timeout so a credential-less
-    # shell fails fast instead of hanging or prompting.
-    if GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=10' \
-        git fetch --quiet "$remote" "$branch" 2>/dev/null; then
-        baseline=$(git rev-parse --verify FETCH_HEAD 2>/dev/null) || {
-            echo "${RED}error:${RESET} --fetch: fetched $remote/$branch but could not resolve FETCH_HEAD" >&2
-            exit 1
-        }
-    elif git rev-parse --verify --quiet "refs/remotes/$remote/$branch" >/dev/null; then
-        baseline=$(git rev-parse --verify "refs/remotes/$remote/$branch")
-        when=$(git show -s --format=%cr "$baseline" 2>/dev/null || echo "unknown age")
-        echo "${YELLOW}warning:${RESET} --fetch: could not fetch $remote/$branch (offline or no auth here);" >&2
-        echo "         using last-synced $remote/$branch (committed $when)." >&2
-    else
-        echo "${RED}error:${RESET} --fetch: could not fetch $remote/$branch and no local $remote/$branch tracking ref exists." >&2
-        echo "       run \`git fetch $remote $branch\` where you have credentials, then re-run." >&2
-        exit 1
+# When comparing against a parent branch (the default, or an explicit single
+# baseline), diff from where HEAD *diverged* from that branch — the merge-base —
+# rather than the branch's current tip. Otherwise every commit that landed on
+# the parent after we branched off (or last merged from) it shows up as spurious
+# added/removed API, polluting the diff and any changelog built from it. The
+# branch point is always local history — any parent commit we merged is by
+# definition a local ancestor — so this needs no network access.
+#
+# `merge-base(X, HEAD) == X` whenever X is already an ancestor of HEAD, so this
+# is a no-op for tags and release commits and only moves the baseline exactly
+# when the parent branch has advanced past the branch point — the case worth
+# fixing. Reduces the global `baseline` (a ref) to that merge-base SHA and tags
+# `baseline_label` accordingly. A no-op (leaves `baseline` untouched) if the two
+# refs share no common ancestor (unrelated histories).
+reduce_to_merge_base() {
+    local mb head_for_mb="${head_ref:-HEAD}"
+    if mb=$(git merge-base "$baseline" "$head_for_mb" 2>/dev/null) && [ -n "$mb" ]; then
+        baseline_label="merge-base($baseline_label, $head_label)"
+        baseline="$mb"
     fi
 }
 
@@ -556,12 +478,6 @@ if [ $# -gt 2 ]; then
     exit 1
 fi
 
-# Capture the positional args before the dirty/clean logic rewrites `baseline`,
-# so --fetch can recover the user-specified branch name regardless of which
-# default branch the non-fetch path would otherwise pick.
-npos=$#
-pos1="${1:-}"
-
 # `head_label` is what we display in headings and error messages. For
 # the synthesized worktree commit, we don't want to expose the SHA
 # (it's an implementation detail) — show "working tree" instead.
@@ -575,12 +491,19 @@ if [ $# -lt 2 ] && is_worktree_dirty; then
     mode_dirty=true
 fi
 
+# `use_merge_base` controls whether a branch baseline is reduced to its branch
+# point with HEAD (see `reduce_to_merge_base`). On for the "compare my work
+# against a parent branch" cases (default, or a single explicit baseline); off
+# for an explicit two-ref comparison, which is taken literally, and for the
+# dirty no-arg case, whose baseline is already HEAD.
 if [ $# -ge 2 ]; then
     baseline="$1"
     head_ref="$2"
     head_label="$2"
+    use_merge_base=false
 elif [ $# -eq 1 ]; then
     baseline="$1"
+    use_merge_base=true
     if $mode_dirty; then
         head_ref="" # filled in below, after RUN_TMP exists
         head_label="working tree"
@@ -593,23 +516,22 @@ else
         baseline="HEAD"
         head_ref="" # filled in below
         head_label="working tree"
+        use_merge_base=false
     else
         baseline=$(detect_parent_branch)
         head_ref="HEAD"
         head_label="HEAD"
+        use_merge_base=true
     fi
 fi
 
-# Display label for the baseline ref; defaults to the ref itself. --fetch
-# overrides it with the remote-tracking label (e.g. `upstream/main`) once it has
-# resolved the baseline to a concrete commit.
+# Display label for the baseline ref; defaults to the ref itself.
 baseline_label="$baseline"
 
-# --fetch: replace the baseline with the current tip of a remote branch so a
-# stale local `main` can't skew the diff. This may abort on its own (no remote,
-# or nothing to fall back to); otherwise `baseline` is now a concrete SHA.
-if $do_fetch; then
-    resolve_fetch_baseline
+# Reduce a branch baseline to its branch point (merge-base with the head), so
+# commits that landed on the parent after we branched don't pollute the diff.
+if $use_merge_base; then
+    reduce_to_merge_base
 fi
 
 # Verify the baseline ref exists. Head verification is deferred until
