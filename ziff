@@ -28,7 +28,7 @@
 # PREREQUISITES
 #   cargo install cargo-public-api
 #   jq
-#   a nightly toolchain (only for --with-values; builds rustdoc JSON)
+#   a nightly toolchain (builds rustdoc JSON)
 #
 # USAGE
 #   ziff [options] [<baseline> [<head>]]
@@ -77,8 +77,8 @@
 #                    fully-qualified, one-item-per-line list.
 #   --with-values    Also diff public const/static values and doc text via
 #                    rustdoc JSON. Catches changes cargo-public-api can't see
-#                    (it is signature-only). Needs a nightly toolchain and
-#                    roughly doubles the rustdoc work, hence opt-in.
+#                    (it is signature-only). Roughly doubles the rustdoc work,
+#                    hence opt-in.
 #   --changelog      Emit a librustzcash-style changelog (markdown) on stdout
 #                    instead of the diff: one `## <crate>` section per changed
 #                    crate, with `### Added`/`### Changed`/`### Removed` lists
@@ -87,8 +87,8 @@
 #                    dependency changes are folded in too: internal workspace
 #                    bumps and external `Migrated to ...` lines under Changed,
 #                    dropped deps under Removed. Other output is suppressed.
-#   --json           Emit a machine-readable JSON summary on stdout (all
-#                    human-readable output is suppressed). Schema:
+#   --json           Emit machine-readable JSON on stdout.
+#                    Progress and diagnostics go to stderr. Schema:
 #                      {
 #                        baseline:     "<ref, or 'merge-base(<ref>, <head>)'>",
 #                        baseline_sha: "<short sha>",
@@ -110,11 +110,17 @@
 #                        },
 #                        values: [ {crate, path, type, old, new} ],
 #                        docs:   [ {crate, path} ],
-#                        crates: [ {name, removed, changed, added, status} ]
+#                        crates: [
+#                          { name, removed, changed, added, status,
+#                            error: null | {
+#                              stage, ref, ref_sha, command, stderr, hint
+#                            }
+#                          }
+#                        ]
 #                      }
-#                    Per-crate `status` is "ok" or "error"; an "error"
-#                    crate has removed/changed/added all zero because
-#                    cargo-public-api could not produce a diff.
+#                    Error `stage` is baseline_build, head_build, or diff.
+#                    ziff keeps --all-features and does not automatically fall
+#                    back to default features because that can hide public API.
 #
 # EXAMPLES
 #   ziff                     # if dirty: HEAD -> working tree
@@ -164,36 +170,56 @@
 #                      an additional persistent `<cache>/values-target/` holds
 #                      the shared rustdoc target tree; it is not cleaned on exit
 #                      and may grow large — delete it to reclaim space.
-#   ZIFF_TOOLCHAIN  Nightly toolchain name used to build rustdoc JSON for
-#                        --with-values. Defaults to the first installed
-#                        `nightly*` toolchain.
+#   ZIFF_TOOLCHAIN     Nightly toolchain name used to build rustdoc JSON.
+#                      Defaults to the first installed `nightly*` toolchain.
 #   NO_COLOR           When set to any non-empty value, disables ANSI
 #                      color output (https://no-color.org).
 #
 # EXIT CODES
-#   0   No breaking changes. No API removals or signature changes, and no
-#       breaking runtime-dep removals, major bumps, or feature removals.
-#       Additive changes (new APIs, new deps) are fine. With --with-values,
-#       public doc-comment changes are reported but informational and do not
-#       affect the exit code.
-#   1   Either:
-#         - Breaking changes were detected (API removals/changes, or a
-#           runtime dep was removed / major-bumped / lost features), or
-#         - with --with-values, a public const/static value changed
-#           (signature-clean but consumer-visible), or
-#         - `cargo public-api` failed for at least one crate (treated as
-#           unknown state), or
-#         - An unrecoverable runtime error occurred (missing ref, lockfile
-#           out of sync, missing tools, etc).
-#       In `--json` mode the `verdict` field distinguishes these:
-#       "breaking" vs "error" (and "ok" for exit 0).
+#   0   Clean. No breaking API, dependency, or value changes were found.
+#   1   Breaking changes were detected.
+#   2   Analysis error. ziff could not produce a trustworthy verdict because
+#       cargo-public-api, rustdoc, metadata, or another analysis step failed.
+#   64  Usage or setup error, such as an unknown option, bad ref, missing
+#       required tool, or unsupported shell.
 
-set -euo pipefail
+EXIT_OK=0
+EXIT_BREAKING=1
+EXIT_ANALYSIS=2
+EXIT_USAGE=64
+
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "error: ziff must be run with bash 4+" >&2
+    echo "  macOS users can install it with: brew install bash" >&2
+    exit "$EXIT_USAGE"
+fi
+
+ziff_reexec_with_newer_bash() {
+    [ -z "${ZIFF_BASH_REEXEC:-}" ] || return 1
+    [ -f "$0" ] && [ -r "$0" ] || return 1
+    local candidate path major
+    for candidate in "${ZIFF_BASH:-}" bash /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        [ -n "$candidate" ] || continue
+        path=$(command -v "$candidate" 2>/dev/null || true)
+        [ -n "$path" ] || continue
+        major=$("$path" -c 'printf "%s\n" "${BASH_VERSINFO[0]}"' 2>/dev/null || printf '0\n')
+        case "$major" in
+        [4-9] | [1-9][0-9]*) exec env ZIFF_BASH_REEXEC=1 "$path" "$0" "$@" ;;
+        esac
+    done
+    return 1
+}
 
 if (( BASH_VERSINFO[0] < 4 )); then
-    echo "error: bash 4+ required (associative arrays); macOS ships 3.2 — \`brew install bash\` and re-run" >&2
-    exit 1
+    ziff_reexec_with_newer_bash "$@" || {
+        echo "error: bash 4+ required (associative arrays)" >&2
+        echo "  macOS ships bash 3.2. Install a newer bash with: brew install bash" >&2
+        echo "  Then run: /opt/homebrew/bin/bash $0 $*" >&2
+        exit "$EXIT_USAGE"
+    }
 fi
+
+set -euo pipefail
 
 # Version string. Used as the dep-cache key when the script isn't a readable
 # file on disk (e.g. run via `curl … | bash`, where $0 can't be hashed). Bump
@@ -222,12 +248,11 @@ else
     RED="" GREEN="" YELLOW="" BOLD="" DIM="" RESET=""
 fi
 
-# ── progress (single line on stderr; only when stderr is a TTY) ───────
+# ── progress ──────────────────────────────────────────────────────────
 # A spinner-prefixed status line for the slow per-crate loops
 # (cargo-public-api, --with-values rustdoc). A background tick re-renders
 # every 100ms so the spinner keeps moving even while a single cargo
-# invocation blocks the foreground. Silent off-TTY and in --json mode so
-# logs and machine-readable output stay clean.
+# invocation blocks the foreground. Non-TTY stderr gets one line per progress update.
 SPINNER_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 progress_state_file=
 progress_pid=
@@ -235,7 +260,6 @@ progress_pid=
 # Start the background tick. Idempotent.
 progress_start() {
     [ -n "$progress_pid" ] && return 0
-    ${json_mode:-false} && return 0
     [ -t 2 ] || return 0
     progress_state_file=$(mktemp -p "$RUN_TMP" progress.XXXXXX)
     : >"$progress_state_file"
@@ -251,11 +275,12 @@ progress_start() {
     progress_pid=$!
 }
 
-# Update the displayed message; the background tick picks it up on its
-# next iteration. No-op if the tick hasn't been started.
 progress() {
-    [ -z "$progress_state_file" ] && return 0
-    printf '%s' "$1" >"$progress_state_file"
+    if [ -n "$progress_state_file" ]; then
+        printf '%s' "$1" >"$progress_state_file"
+    elif [ ! -t 2 ]; then
+        printf 'ziff: %s\n' "$1" >&2
+    fi
 }
 
 # Stop the tick and clear the line.
@@ -266,7 +291,6 @@ progress_clear() {
         progress_pid=
         progress_state_file=
     fi
-    ${json_mode:-false} && return 0
     [ -t 2 ] || return 0
     printf '\r\033[K' >&2
 }
@@ -305,7 +329,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
     -h | --help)
         show_help
-        exit 0
+        exit "$EXIT_OK"
         ;;
     --with-lock)
         with_lock=true
@@ -337,7 +361,7 @@ while [ $# -gt 0 ]; do
         ;;
     -*)
         echo "${RED}error:${RESET} unknown option '$1' (run with --help for usage)" >&2
-        exit 1
+        exit "$EXIT_USAGE"
         ;;
     *)
         break
@@ -483,7 +507,7 @@ worktree_snapshot_commit() {
 #       clean → head = HEAD (committed only)
 if [ $# -gt 2 ]; then
     echo "${RED}error:${RESET} too many positional arguments, expected at most 2 (run with --help for usage)" >&2
-    exit 1
+    exit "$EXIT_USAGE"
 fi
 
 # `head_label` is what we display in headings and error messages. For
@@ -546,24 +570,34 @@ fi
 # after RUN_TMP is set up (worktree-snapshot mode resolves head_ref then).
 if ! git rev-parse --verify "$baseline" >/dev/null 2>&1; then
     echo "${RED}error:${RESET} unknown git ref '$baseline' (run with --help for usage)" >&2
-    exit 1
+    exit "$EXIT_USAGE"
 fi
 if [ -n "$head_ref" ] && ! git rev-parse --verify "$head_ref" >/dev/null 2>&1; then
     echo "${RED}error:${RESET} unknown git ref '$head_ref' (run with --help for usage)" >&2
-    exit 1
+    exit "$EXIT_USAGE"
 fi
 
 # Verify cargo-public-api is installed.
 if ! cargo public-api --version >/dev/null 2>&1; then
     echo "${RED}error:${RESET} cargo-public-api is not installed" >&2
     echo "  install it with: cargo install cargo-public-api" >&2
-    exit 1
+    exit "$EXIT_USAGE"
+fi
+
+nightly_toolchain="${ZIFF_TOOLCHAIN:-}"
+if [ -z "$nightly_toolchain" ]; then
+    nightly_toolchain=$(rustup toolchain list 2>/dev/null | grep -oE 'nightly[^ ]*' | head -n1 || true)
+fi
+if [ -z "$nightly_toolchain" ]; then
+    echo "${RED}error:${RESET} ziff needs a nightly toolchain to build rustdoc JSON" >&2
+    echo "  install one with: rustup toolchain install nightly" >&2
+    exit "$EXIT_USAGE"
 fi
 
 # Verify jq is installed.
 if ! command -v jq >/dev/null 2>&1; then
     echo "${RED}error:${RESET} jq is not installed" >&2
-    exit 1
+    exit "$EXIT_USAGE"
 fi
 
 baseline_short=$(git rev-parse --short "$baseline" 2>/dev/null || echo "$baseline")
@@ -614,14 +648,15 @@ sha1_short() {
         openssl dgst -sha1 "$1" | awk '{print $NF}' | cut -c1-12
     else
         echo "${RED}error:${RESET} no SHA-1 tool found (install sha1sum, shasum, or openssl)" >&2
-        exit 1
+        exit "$EXIT_USAGE"
     fi
 }
 
 # List workspace crate names (one per line), sorted. Used by both the
 # per-crate API-diff loop and the lock-diff direct-dep filter.
-workspace_crate_names() {
-    cargo metadata --no-deps --format-version 1 2>/dev/null |
+workspace_crate_names() { # $1=workspace dir, defaults to PWD
+    local workspace_dir=${1:-$PWD}
+    cargo metadata --manifest-path "$workspace_dir/Cargo.toml" --no-deps --format-version 1 2>/dev/null |
         jq -r '
             (.workspace_members) as $ws |
             [.packages[] | select(.id as $id | $ws | index($id)) | .name]
@@ -660,39 +695,45 @@ cleanup_run_tmp() {
     fi
 }
 trap cleanup_run_tmp EXIT
+git worktree prune >/dev/null 2>&1 || true
 
-# If we deferred head_ref resolution (worktree-snapshot mode), do it now
-# that RUN_TMP exists. The synthesized commit object is parented at HEAD
-# and contains the working tree's tracked + untracked + staged contents.
-#
-# `api_cwd` is where the per-crate `cargo public-api ... diff A..B` loop
-# runs from. cargo-public-api's git-ref diff mode performs `git checkout`
-# in CWD, which would conflict with the user's dirty working tree, so
-# in worktree-snapshot mode we point it at a dedicated detached worktree
-# parked at the snapshot commit. In normal (clean) mode we just stay in
-# the user's repo root.
-api_cwd="$PWD"
+# If we deferred head_ref resolution (worktree-snapshot mode), do it now that
+# RUN_TMP exists. The synthesized commit object is parented at HEAD and contains
+# the working tree's tracked + untracked + staged contents.
 if [ -z "$head_ref" ]; then
-    head_ref=$(worktree_snapshot_commit) || exit 1
-    api_cwd=$(mktemp -d -p "$RUN_TMP" snapshot.XXXXXX)
-    if ! git worktree add --detach --quiet "$api_cwd" "$head_ref" 2>/dev/null; then
-        echo "${RED}error:${RESET} failed to create worktree for working-tree snapshot" >&2
-        exit 1
-    fi
+    head_ref=$(worktree_snapshot_commit) || exit "$EXIT_ANALYSIS"
 fi
 
 head_short=$(git rev-parse --short "$head_ref" 2>/dev/null || echo "$head_ref")
 
-# Pre-resolve full-length SHAs for baseline + head so downstream
-# `cargo public-api ... diff $base..$head` doesn't have to re-resolve
-# the refs in a worktree where `HEAD` may point somewhere else.
+# Pre-resolve full-length SHAs for baseline + head before creating isolated
+# worktrees. This also makes HEAD unambiguous when head_ref is a snapshot commit.
 baseline_sha=$(git rev-parse --verify "$baseline" 2>/dev/null) || {
     echo "${RED}error:${RESET} cannot resolve baseline ref '$baseline'" >&2
-    exit 1
+    exit "$EXIT_ANALYSIS"
 }
 head_sha=$(git rev-parse --verify "$head_ref" 2>/dev/null) || {
     echo "${RED}error:${RESET} cannot resolve head ref" >&2
-    exit 1
+    exit "$EXIT_ANALYSIS"
+}
+
+api_baseline_worktree=$(mktemp -d -p "$RUN_TMP" api-baseline.XXXXXX)
+if ! git worktree add --detach --quiet "$api_baseline_worktree" "$baseline_sha" 2>/dev/null; then
+    echo "${RED}error:${RESET} failed to create public-api worktree for '$baseline_label'" >&2
+    exit "$EXIT_ANALYSIS"
+fi
+
+api_head_worktree=$(mktemp -d -p "$RUN_TMP" api-head.XXXXXX)
+if ! git worktree add --detach --quiet "$api_head_worktree" "$head_sha" 2>/dev/null; then
+    echo "${RED}error:${RESET} failed to create public-api worktree for '$head_label'" >&2
+    exit "$EXIT_ANALYSIS"
+fi
+
+api_baseline_target="$RUN_TMP/api-baseline-target"
+api_head_target="$RUN_TMP/api-head-target"
+mkdir -p "$api_baseline_target" "$api_head_target" 2>/dev/null || {
+    echo "${RED}error:${RESET} failed to create public-api target dirs" >&2
+    exit "$EXIT_ANALYSIS"
 }
 
 echo "${BOLD}Comparing public API: ${baseline_label}${RESET}${DIM} (${baseline_short})${RESET} ${BOLD}-> ${head_label}${RESET}${DIM} (${head_short})${RESET}"
@@ -731,7 +772,7 @@ dump_workspace_deps() {
 
     # Worktree lives under RUN_TMP so the script-level EXIT trap cleans it
     # up even if we abort partway through.
-    local tmp
+    local tmp cache_tmp
     tmp=$(mktemp -d -p "$RUN_TMP")
 
     if ! git worktree add --detach --quiet "$tmp" "$ref" 2>/dev/null; then
@@ -765,6 +806,7 @@ dump_workspace_deps() {
     # Workspace-internal crates (those listed in `workspace_members`) are
     # excluded from the output entirely, because their versions are covered
     # by the per-crate public-API diff section.
+    cache_tmp=$(mktemp -p "$CACHE_DIR" "${sha}.${SCRIPT_HASH}.deps.XXXXXX") || return 1
     jq -r --arg test_pat "$TEST_CRATE_PATTERN" '
         def kind_rank:
             {"runtime": 3, "build": 2, "dev": 1, "unused": 0}[.];
@@ -869,12 +911,12 @@ dump_workspace_deps() {
               (.features | sort | join(","))
             ] | @tsv
         )
-    ' <<<"$meta" >"$cache_file.tmp" || {
-        rm -f "$cache_file.tmp"
+    ' <<<"$meta" >"$cache_tmp" || {
+        rm -f "$cache_tmp"
         echo "${RED}error:${RESET} jq failed processing metadata for '$ref'" >&2
         return 1
     }
-    mv "$cache_file.tmp" "$cache_file"
+    mv -f "$cache_tmp" "$cache_file"
     cat "$cache_file"
 }
 
@@ -894,7 +936,7 @@ dump_workspace_deps() {
 # runtime surface and Zebra/lrz changelogs never document them. Cached on
 # ref-SHA + script hash like the other dumps.
 dump_per_crate_deps() { # $1=ref -> stdout TSV
-    local ref=$1 sha cache_file tmp meta
+    local ref=$1 sha cache_file tmp cache_tmp meta
     sha=$(git rev-parse --verify "$ref" 2>/dev/null) || return 1
     cache_file="$CACHE_DIR/${sha}.${SCRIPT_HASH}.percrate-deps.tsv"
     if [ -s "$cache_file" ]; then cat "$cache_file"; return 0; fi
@@ -910,6 +952,7 @@ dump_per_crate_deps() { # $1=ref -> stdout TSV
         return 1
     fi
     git worktree remove --force "$tmp" >/dev/null 2>&1 || true
+    cache_tmp=$(mktemp -p "$CACHE_DIR" "${sha}.${SCRIPT_HASH}.percrate-deps.XXXXXX") || return 1
     jq -r --arg test_pat "$TEST_CRATE_PATTERN" '
         (.workspace_members) as $ws_ids |
         ([ .packages[] | select(.id as $id | $ws_ids | index($id)) | .name ]) as $ws_names |
@@ -936,12 +979,12 @@ dump_per_crate_deps() { # $1=ref -> stdout TSV
         | sort_by(.crate, .dep)
         | .[]
         | [ .crate, .dep, .req, .scope ] | @tsv
-    ' <<<"$meta" >"$cache_file.tmp" || {
-        rm -f "$cache_file.tmp"
+    ' <<<"$meta" >"$cache_tmp" || {
+        rm -f "$cache_tmp"
         echo "${YELLOW}warning:${RESET} jq failed processing per-crate deps for '$ref'" >&2
         return 1
     }
-    mv "$cache_file.tmp" "$cache_file"
+    mv -f "$cache_tmp" "$cache_file"
     cat "$cache_file"
 }
 
@@ -953,7 +996,7 @@ dump_per_crate_deps() { # $1=ref -> stdout TSV
 # results are cached on ref-SHA + script hash.
 dump_trait_map() { # $1=ref  $2..=crate names  -> stdout TSV: self member trait
     local ref=$1; shift
-    local sha wt target json crate cache_file idx=0 total=$#
+    local sha wt target json crate cache_file cache_tmp idx=0 total=$#
     [ -z "${nightly_toolchain:-}" ] && return 0
     sha=$(git rev-parse --verify "$ref" 2>/dev/null) || return 0
     target="$CACHE_DIR/trait-target"; mkdir -p "$target" 2>/dev/null || true
@@ -963,13 +1006,15 @@ dump_trait_map() { # $1=ref  $2..=crate names  -> stdout TSV: self member trait
         idx=$((idx + 1))
         cache_file="$CACHE_DIR/${sha}.${SCRIPT_HASH}.${crate}.traitmap.tsv"
         if [ -f "$cache_file" ]; then cat "$cache_file"; continue; fi
-        progress "${DIM}--changelog: trait map [$idx/$total] $crate${RESET}"
+        progress "--changelog: trait map [$idx/$total] $crate"
         if CARGO_TARGET_DIR="$target" cargo +"$nightly_toolchain" rustdoc -q \
             --manifest-path "$wt/Cargo.toml" -p "$crate" --lib "${feature_args[@]}" \
             -- -Z unstable-options --output-format json >/dev/null 2>&1; then
             json="$target/doc/${crate//-/_}.json"
             if [ -f "$json" ]; then
-                jq -r "$TRAIT_MAP_JQ" "$json" 2>/dev/null | sort -u >"$cache_file" || : >"$cache_file"
+                cache_tmp=$(mktemp -p "$CACHE_DIR" "${sha}.${SCRIPT_HASH}.${crate}.traitmap.XXXXXX") || continue
+                jq -r "$TRAIT_MAP_JQ" "$json" 2>/dev/null | sort -u >"$cache_tmp" || : >"$cache_tmp"
+                mv -f "$cache_tmp" "$cache_file" || { rm -f "$cache_tmp"; continue; }
                 cat "$cache_file"
             fi
         fi
@@ -977,8 +1022,8 @@ dump_trait_map() { # $1=ref  $2..=crate names  -> stdout TSV: self member trait
     git worktree remove --force "$wt" >/dev/null 2>&1 || true
 }
 
-base_dump=$(dump_workspace_deps "$baseline") || exit 1
-head_dump=$(dump_workspace_deps "$head_ref") || exit 1
+base_dump=$(dump_workspace_deps "$baseline") || exit "$EXIT_ANALYSIS"
+head_dump=$(dump_workspace_deps "$head_ref") || exit "$EXIT_ANALYSIS"
 
 # Build two maps keyed on dep name. Each value is the dep's record
 # columns 2-6 (ver, kind, opt, def, feat) tab-joined into a single
@@ -1246,7 +1291,7 @@ if $with_lock; then
         done
         while IFS= read -r n; do
             [ -n "$n" ] && direct_names[$n]=1
-        done < <(workspace_crate_names)
+        done < <(workspace_crate_names "$api_head_worktree")
 
         # Lock files can list the same crate at multiple major versions
         # (e.g. `foo 1.2.0` and `foo 2.0.0` coexisting). Comma-join them
@@ -1407,13 +1452,13 @@ fi
 # ── per-crate API diff ─────────────────────────────────────────────────
 #
 # Crate discovery uses `cargo metadata --no-deps` so nested workspace
-# crates are found regardless of directory layout. For each crate we
-# run `cargo public-api -p <crate> diff $baseline..$head` and parse its
-# text output into three buckets (removed / changed / added). Failures
+# crates are found regardless of directory layout. For each crate we build
+# rustdoc JSON in the isolated baseline and head worktrees, diff those JSON
+# files with cargo-public-api, and parse the text output into three buckets.
 # (e.g. rustdoc crashed, baseline missing) are captured per-crate as
 # `status=error` and surfaced in the summary and verdict.
 
-readarray -t all_crates < <(workspace_crate_names)
+readarray -t all_crates < <(workspace_crate_names "$api_head_worktree")
 crate_count=${#all_crates[@]}
 if [ "$crate_count" -eq 0 ]; then
     echo "${YELLOW}warning:${RESET} no workspace crates discovered via cargo metadata" >&2
@@ -1431,9 +1476,106 @@ declare -a crate_removed_lines=()
 declare -a crate_changed_lines=()
 declare -a crate_added_lines=()
 declare -a crate_status=()
+declare -a crate_error_stage=()
+declare -a crate_error_ref=()
+declare -a crate_error_ref_sha=()
+declare -a crate_error_command=()
+declare -a crate_error_stderr=()
+declare -a crate_error_hint=()
 
 changed_crate_count=0
 error_crate_count=0
+
+public_api_error_tail() {
+    local file=$1 text
+    text=$(tail -n 80 "$file" 2>/dev/null | tr -d '\r' || true)
+    if [ -z "$text" ]; then
+        text="public API analysis failed without writing stderr"
+    fi
+    printf '%s' "$text"
+}
+
+public_api_hint() {
+    local text=${1,,}
+    case "$text" in
+    *protoc* | *protobuf-compiler*)
+        echo "Install protoc, for example brew install protobuf or apt-get install protobuf-compiler, then rerun ziff."
+        ;;
+    *"custom build command"*)
+        echo "A build script failed. Run the command shown above to inspect the crate's build requirements."
+        ;;
+    *"cargo.lock"* | *"lock file"* | *"lockfile"*)
+        echo "The lockfile or dependency resolution failed at this ref. Check Cargo.lock and rerun ziff."
+        ;;
+    *"requires rustc"* | *"rustc "*"is not supported"*)
+        echo "The selected Rust toolchain cannot build this ref. Install the required toolchain and rerun ziff."
+        ;;
+    *"no library targets"* | *"does not have a library target"*)
+        echo "cargo-public-api can only analyze library targets. Exclude this crate or add a library target."
+        ;;
+    *"could not compile"*)
+        echo "The crate did not compile under the selected feature set. Fix the build or choose a supported feature policy."
+        ;;
+    *)
+        echo "Run the command shown above and fix the failing crate build before trusting the API diff."
+        ;;
+    esac
+}
+
+public_api_command() {
+    local crate=$1 stage=$2
+    case "$stage" in
+    baseline_build | head_build) printf 'cargo public-api %s -p %s -ss' "${feature_args[*]}" "$crate" ;;
+    *) printf 'cargo public-api %s -ss diff first.json second.json' "${feature_args[*]}" ;;
+    esac
+}
+
+print_public_api_errors() {
+    {
+        echo "${RED}${BOLD}ERROR${RESET}${RED}: cargo-public-api failed for ${error_crate_count} crate(s).${RESET}"
+        for i in "${!crate_names[@]}"; do
+            [ "${crate_status[$i]}" = error ] || continue
+            echo ""
+            echo "  ${BOLD}${crate_names[$i]}${RESET}"
+            echo "    stage: ${crate_error_stage[$i]}"
+            echo "    ref: ${crate_error_ref[$i]} (${crate_error_ref_sha[$i]})"
+            echo "    command: ${crate_error_command[$i]}"
+            echo "    hint: ${crate_error_hint[$i]}"
+            echo "    stderr:"
+            while IFS= read -r line; do
+                printf '      %s\n' "$line"
+            done <<<"${crate_error_stderr[$i]}"
+        done
+    } >&2
+}
+
+public_api_json_path() { # $1=crate  $2=target-dir
+    printf '%s/doc/%s.json' "$2" "${1//-/_}"
+}
+
+run_public_api_rustdoc() { # $1=crate  $2=worktree  $3=target-dir  $4=err-file
+    local crate=$1 wt=$2 target=$3 err_file=$4 json
+    if CARGO_TARGET_DIR="$target" cargo +"$nightly_toolchain" rustdoc -q \
+        --manifest-path "$wt/Cargo.toml" -p "$crate" --lib "${feature_args[@]}" \
+        -- -Z unstable-options --output-format json >/dev/null 2>"$err_file"; then
+        json=$(public_api_json_path "$crate" "$target")
+        if [ -f "$json" ]; then
+            return 0
+        fi
+        printf 'rustdoc did not produce %s\n' "$json" >"$err_file"
+    fi
+    return 1
+}
+
+record_public_api_failure() { # $1=crate  $2=stage  $3=ref-label  $4=ref-sha  $5=err-file
+    local crate=$1 err_file=$5
+    PUBLIC_API_ERROR_STAGE=$2
+    PUBLIC_API_ERROR_REF=$3
+    PUBLIC_API_ERROR_REF_SHA=$4
+    PUBLIC_API_ERROR_STDERR=$(public_api_error_tail "$err_file")
+    PUBLIC_API_ERROR_COMMAND=$(public_api_command "$crate" "$2")
+    PUBLIC_API_ERROR_HINT=$(public_api_hint "$PUBLIC_API_ERROR_STDERR")
+}
 
 # Auto-size the crate-name column so longer names (e.g. if a new
 # `-test-helpers` crate lands) don't misalign the table. Floor at 16 so
@@ -1452,26 +1594,32 @@ api_rows=""
 progress_start
 for i in "${!all_crates[@]}"; do
     crate_name="${all_crates[$i]}"
-    progress "${DIM}public-api: [$((i + 1))/$crate_count] $crate_name${RESET}"
-    err_file="$RUN_TMP/${crate_name}.err"
-    # Run from `api_cwd` so cargo-public-api's internal `git checkout`
-    # doesn't trip on a dirty working tree in worktree-snapshot mode.
-    # In normal mode, `api_cwd == $PWD`, so this is a no-op.
-    #
-    # `baseline_sha` / `head_sha` are pre-resolved absolute SHAs because
-    # `HEAD` resolves differently across worktrees (the snapshot worktree
-    # has its own detached HEAD pointing at the synth commit, so passing
-    # the literal string "HEAD" would diff snapshot-vs-snapshot).
-    #
+    progress "public-api: [$((i + 1))/$crate_count] $crate_name"
+
     # `-ss` (not `-sss`) omits blanket and auto-trait impls but *keeps*
     # auto-derived ones, so a changelog-worthy `impl Hash for T` is not hidden.
     # In a diff this only surfaces derives that actually changed, so the extra
     # noise is bounded to added/removed types.
-    if ! output=$(cd "$api_cwd" && cargo public-api "${feature_args[@]}" -p "$crate_name" -ss diff "$baseline_sha..$head_sha" 2>"$err_file"); then
-        # cargo-public-api failed outright (missing baseline, rustdoc
-        # failure, etc.). Record and surface the error.
+    base_err_file="$RUN_TMP/${crate_name}.baseline.err"
+    head_err_file="$RUN_TMP/${crate_name}.head.err"
+    err_file="$RUN_TMP/${crate_name}.diff.err"
+    base_json=$(public_api_json_path "$crate_name" "$api_baseline_target")
+    head_json=$(public_api_json_path "$crate_name" "$api_head_target")
+    public_api_failed=false
+
+    if ! run_public_api_rustdoc "$crate_name" "$api_baseline_worktree" "$api_baseline_target" "$base_err_file"; then
+        public_api_failed=true
+        record_public_api_failure "$crate_name" baseline_build "$baseline_label" "$baseline_sha" "$base_err_file"
+    elif ! run_public_api_rustdoc "$crate_name" "$api_head_worktree" "$api_head_target" "$head_err_file"; then
+        public_api_failed=true
+        record_public_api_failure "$crate_name" head_build "$head_label" "$head_sha" "$head_err_file"
+    elif ! output=$(cd "$RUN_TMP" && cargo public-api "${feature_args[@]}" -p "$crate_name" -ss diff "$base_json" "$head_json" 2>"$err_file"); then
+        public_api_failed=true
+        record_public_api_failure "$crate_name" diff "$baseline_label..$head_label" "$baseline_sha..$head_sha" "$err_file"
+    fi
+
+    if $public_api_failed; then
         error_crate_count=$((error_crate_count + 1))
-        err_msg=$(head -n1 "$err_file" 2>/dev/null || echo "")
         crate_names+=("$crate_name")
         crate_removed+=(0)
         crate_changed+=(0)
@@ -1480,8 +1628,15 @@ for i in "${!all_crates[@]}"; do
         crate_changed_lines+=("")
         crate_added_lines+=("")
         crate_status+=("error")
-        api_rows+=$(printf "  %-${crate_col_width}s ${RED}error${RESET}${DIM}: %s${RESET}" \
-            "$crate_name" "${err_msg:-cargo public-api failed}")$'\n'
+        crate_error_stage+=("$PUBLIC_API_ERROR_STAGE")
+        crate_error_ref+=("$PUBLIC_API_ERROR_REF")
+        crate_error_ref_sha+=("$PUBLIC_API_ERROR_REF_SHA")
+        crate_error_command+=("$PUBLIC_API_ERROR_COMMAND")
+        crate_error_stderr+=("$PUBLIC_API_ERROR_STDERR")
+        crate_error_hint+=("$PUBLIC_API_ERROR_HINT")
+        first_line=$(printf '%s\n' "$PUBLIC_API_ERROR_STDERR" | sed -n '1p')
+        api_rows+=$(printf "  %-${crate_col_width}s ${RED}error${RESET}: %s${DIM} (%s)${RESET}" \
+            "$crate_name" "$PUBLIC_API_ERROR_STAGE" "${first_line:-cargo public-api failed}")$'\n'
         continue
     fi
 
@@ -1534,6 +1689,12 @@ for i in "${!all_crates[@]}"; do
     crate_changed_lines+=("$changed_buf")
     crate_added_lines+=("$added_buf")
     crate_status+=("ok")
+    crate_error_stage+=("")
+    crate_error_ref+=("")
+    crate_error_ref_sha+=("")
+    crate_error_command+=("")
+    crate_error_stderr+=("")
+    crate_error_hint+=("")
 
     removed_total=$((removed_total + r))
     changed_total=$((changed_total + c))
@@ -1636,7 +1797,7 @@ if $with_values; then
             while IFS= read -r crate; do
                 [ -z "$crate" ] && continue
                 idx=$((idx + 1))
-                progress "${DIM}--with-values: rustdoc JSON [$ref_label $idx/$crate_count] $crate${RESET}"
+                progress "--with-values: rustdoc JSON [$ref_label $idx/$crate_count] $crate"
                 if CARGO_TARGET_DIR="$values_target" cargo +"$nightly_toolchain" rustdoc -q \
                     --manifest-path "$wt/Cargo.toml" -p "$crate" --lib "${feature_args[@]}" \
                     -- -Z unstable-options --output-format json >/dev/null 2>&1; then
@@ -1648,7 +1809,7 @@ if $with_values; then
                     # script hash changes. Skip caching this (partial) run.
                     failed=1
                 fi
-            done < <(workspace_crate_names)
+            done < <(workspace_crate_names "$wt")
             git worktree remove --force "$wt" >/dev/null 2>&1 || true
             if [ "$failed" -eq 0 ]; then
                 mv "$tmp_out" "$cache_file" 2>/dev/null || true
@@ -1696,7 +1857,7 @@ echo "${BOLD}Summary${RESET}  ${DIM}(${changed_crate_count}/${crate_count} crate
 
 # Only show the table if there are changes; otherwise a one-liner suffices.
 # In JSON mode we always fall through so the JSON block below emits.
-if [ $((removed_total + changed_total + added_total + value_changed_total + doc_changed_total)) -eq 0 ]; then
+if [ $((removed_total + changed_total + added_total + value_changed_total + doc_changed_total)) -eq 0 ] && [ "$error_crate_count" -eq 0 ]; then
     echo ""
     echo "  ${GREEN}No public API changes.${RESET}"
     # In changelog mode, fall through even with no API changes: a crate may still
@@ -1707,9 +1868,9 @@ if [ $((removed_total + changed_total + added_total + value_changed_total + doc_
         if [ "$dep_breaking_count" -gt 0 ]; then
             echo ""
             echo "${RED}${BOLD}BREAKING${RESET}${RED}: runtime-deps: $dep_breaking_count breaking.${RESET}"
-            exit 1
+            exit "$EXIT_BREAKING"
         fi
-        exit 0
+        exit "$EXIT_OK"
     fi
 fi
 
@@ -2292,12 +2453,18 @@ if [ "$group_mode" != flat ]; then
 fi
 
 has_breaking=false
+[ $((removed_total + changed_total)) -gt 0 ] && has_breaking=true
 
 # ── changelog output (--changelog) ─────────────────────────────────────
 # Reuse the per-crate diff buffers to emit librustzcash-style markdown to the
 # saved stdout (fd 3), one section per changed crate, then stop. (Trait
 # attribution from rustdoc JSON is layered onto this in a later pass.)
 if $changelog_mode; then
+    if [ "$error_crate_count" -gt 0 ]; then
+        print_public_api_errors
+        exit "$EXIT_ANALYSIS"
+    fi
+
     # Per-crate dependency changes, keyed by crate name. Internal workspace
     # crate bumps and external migrations go under "### Changed"; removals under
     # "### Removed". Added deps are intentionally not emitted — Zebra/lrz
@@ -2309,16 +2476,16 @@ if $changelog_mode; then
     # Abort loudly instead of emitting garbage.
     pc_base=$(dump_per_crate_deps "$baseline_sha") || {
         echo "${RED}error:${RESET} could not read per-crate dependencies at baseline ($baseline_sha)" >&2
-        exit 1
+        exit "$EXIT_ANALYSIS"
     }
     pc_head=$(dump_per_crate_deps "$head_sha") || {
         echo "${RED}error:${RESET} could not read per-crate dependencies at head ($head_sha)" >&2
-        exit 1
+        exit "$EXIT_ANALYSIS"
     }
     if [ -z "$pc_base" ] || [ -z "$pc_head" ]; then
         echo "${RED}error:${RESET} per-crate dependency dump was empty for one side" \
             "(baseline=$baseline_sha, head=$head_sha); refusing to emit a degenerate diff" >&2
-        exit 1
+        exit "$EXIT_ANALYSIS"
     fi
     if [ -n "$pc_base$pc_head" ]; then
         while IFS=$'\t' read -r tag cr md; do
@@ -2421,9 +2588,10 @@ if $changelog_mode; then
             fi
         done
     } >&3
-    exit 0
+    exit "$EXIT_OK"
 fi
 
+if ! $json_mode; then
 for i in "${!crate_names[@]}"; do
     r="${crate_removed[$i]}"
     c="${crate_changed[$i]}"
@@ -2488,6 +2656,7 @@ if [ "$doc_changed_total" -gt 0 ]; then
         echo "    ${YELLOW}~ ${path}${RESET}${DIM} (doc text changed)${RESET}"
     done
 fi
+fi
 
 # ── verdict ───────────────────────────────────────────────────────────
 
@@ -2510,7 +2679,6 @@ if $json_mode; then
         verdict="breaking"
     fi
 
-    # Build per-crate array as jq args.
     crate_jsons=()
     for i in "${!crate_names[@]}"; do
         crate_jsons+=(--arg "name$i" "${crate_names[$i]}")
@@ -2518,27 +2686,30 @@ if $json_mode; then
         crate_jsons+=(--argjson "c$i" "${crate_changed[$i]}")
         crate_jsons+=(--argjson "a$i" "${crate_added[$i]}")
         crate_jsons+=(--arg "status$i" "${crate_status[$i]}")
+        crate_jsons+=(--arg "stage$i" "${crate_error_stage[$i]}")
+        crate_jsons+=(--arg "eref$i" "${crate_error_ref[$i]}")
+        crate_jsons+=(--arg "erefsha$i" "${crate_error_ref_sha[$i]}")
+        crate_jsons+=(--arg "cmd$i" "${crate_error_command[$i]}")
+        crate_jsons+=(--arg "stderr$i" "${crate_error_stderr[$i]}")
+        crate_jsons+=(--arg "hint$i" "${crate_error_hint[$i]}")
     done
     crate_expr='['
     for i in "${!crate_names[@]}"; do
         [ "$i" -gt 0 ] && crate_expr+=','
-        crate_expr+="{name:\$name$i,removed:\$r$i,changed:\$c$i,added:\$a$i,status:\$status$i}"
+        crate_expr+="{name:\$name$i,removed:\$r$i,changed:\$c$i,added:\$a$i,status:\$status$i"
+        crate_expr+=",error:(if \$status$i == \"error\" then {stage:\$stage$i,ref:\$eref$i,ref_sha:\$erefsha$i,command:\$cmd$i,stderr:\$stderr$i,hint:\$hint$i} else null end)}"
     done
     crate_expr+=']'
 
-    # Dep arrays: just stream the parsed rows back through jq.
-    dep_rem_expr="[$(printf '%s\n' "${dep_removed[@]}" |
-        awk -F'|' 'NF>=3 {printf "{name:\"%s\",version:\"%s\",kind:\"%s\"},", $1, $2, $3}' |
-        sed 's/,$//')]"
-    dep_chg_expr="[$(printf '%s\n' "${dep_changed[@]}" |
-        awk -F'|' 'NF>=5 {printf "{name:\"%s\",old:\"%s\",new:\"%s\",bump:\"%s\",kind:\"%s\",features:\"%s\"},", $1, $2, $3, $4, $5, $6}' |
-        sed 's/,$//')]"
-    dep_add_expr="[$(printf '%s\n' "${dep_added[@]}" |
-        awk -F'|' 'NF>=3 {printf "{name:\"%s\",version:\"%s\",kind:\"%s\"},", $1, $2, $3}' |
-        sed 's/,$//')]"
-
-    # Build value/doc arrays through jq (not string interpolation) so values
-    # containing quotes or backslashes — e.g. string consts — are escaped.
+    dep_rem_json=$(printf '%s\n' "${dep_removed[@]}" | jq -R -s '
+        split("\n") | map(select(length > 0) | split("|")
+            | {name: .[0], version: .[1], kind: .[2]})')
+    dep_chg_json=$(printf '%s\n' "${dep_changed[@]}" | jq -R -s '
+        split("\n") | map(select(length > 0) | split("|")
+            | {name: .[0], old: .[1], new: .[2], bump: .[3], kind: .[4], features: (.[5] // "")})')
+    dep_add_json=$(printf '%s\n' "${dep_added[@]}" | jq -R -s '
+        split("\n") | map(select(length > 0) | split("|")
+            | {name: .[0], version: .[1], kind: .[2]})')
     val_json=$(printf '%s\n' "${value_changes[@]}" | jq -R -s '
         split("\n") | map(select(length > 0) | split("\t")
             | {crate: .[0], path: .[1], type: .[2], old: .[3], new: .[4]})')
@@ -2560,10 +2731,14 @@ if $json_mode; then
         --argjson removed_total "$removed_total" \
         --argjson changed_total "$changed_total" \
         --argjson added_total "$added_total" \
+        --argjson deps_removed "$dep_rem_json" \
+        --argjson deps_changed "$dep_chg_json" \
+        --argjson deps_added "$dep_add_json" \
         --argjson values "$val_json" \
         --argjson docs "$doc_json" \
         "${crate_jsons[@]}" \
-        "{
+        "($crate_expr) as \$crates |
+        {
             baseline: \$baseline,
             baseline_sha: \$baseline_sha,
             head: \$head,
@@ -2580,35 +2755,25 @@ if $json_mode; then
                 doc_changed: \$doc_changed
             },
             deps: {
-                removed: $dep_rem_expr,
-                changed: $dep_chg_expr,
-                added: $dep_add_expr
+                removed: \$deps_removed,
+                changed: \$deps_changed,
+                added: \$deps_added
             },
             values: \$values,
             docs: \$docs,
-            crates: $crate_expr
+            crates: \$crates
         }" >&3
 
     case "$verdict" in
-    ok) exit 0 ;;
-    *) exit 1 ;;
+    ok) exit "$EXIT_OK" ;;
+    breaking) exit "$EXIT_BREAKING" ;;
+    error) exit "$EXIT_ANALYSIS" ;;
     esac
 fi
 
-# Crates where cargo-public-api failed outright are treated as an unknown
-# state — we can't tell whether their API changed, so surface it loudly and
-# fail the verdict.
 if [ "$error_crate_count" -gt 0 ]; then
-    echo "${RED}${BOLD}ERROR${RESET}${RED}: cargo-public-api failed for ${error_crate_count} crate(s).${RESET}"
-    if [ "$head_label" = "working tree" ]; then
-        # The synthesized worktree-snapshot commit is unreachable and
-        # likely GC'd by the time the user reads this — re-running the
-        # script reproduces the failure (a fresh snapshot is created).
-        echo "${DIM}(re-run this script to reproduce, or commit your changes first to debug with \`cargo public-api -p <crate> diff $baseline_sha..HEAD\`)${RESET}"
-    else
-        echo "${DIM}(run \`cargo public-api -p <crate> diff $baseline_sha..$head_sha\` to reproduce)${RESET}"
-    fi
-    exit 1
+    print_public_api_errors
+    exit "$EXIT_ANALYSIS"
 fi
 
 if $any_breaking; then
@@ -2633,7 +2798,7 @@ if $any_breaking; then
         echo "${DIM}(also $added_total new API items, additive only)${RESET}"
     fi
     [ "$doc_changed_total" -gt 0 ] && echo "${DIM}(also $doc_changed_total public doc-comment change(s))${RESET}"
-    exit 1
+    exit "$EXIT_BREAKING"
 else
     if [ "$added_total" -gt 0 ]; then
         echo "${GREEN}OK: $added_total new API items, no breaking changes.${RESET}"
@@ -2644,5 +2809,5 @@ else
     # Explicit success: the trailing `[ … ] && echo` above evaluates to exit 1
     # when there are no doc changes, which would otherwise make this non-breaking
     # path wrongly report failure.
-    exit 0
+    exit "$EXIT_OK"
 fi

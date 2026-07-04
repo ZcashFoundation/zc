@@ -17,11 +17,18 @@ a single command tells you whether a branch breaks your published surface.
    each annotated with the direct deps that pull it in.
 3. **Per-crate public-API diff** (`cargo public-api`) — removed / changed / added
    items per workspace crate. Built with `--all-features` so feature-gated public
-   items are never silently missed.
+   items are never silently missed. If a crate cannot be analyzed, ziff reports
+   the failing stage, stderr tail, command, and hint instead of returning an empty
+   crate result.
 4. **Const/static value & doc-comment diff** (`--with-values`) — catches changes
    `cargo public-api` can't see, since it compares signatures only.
 
-It ends with a `BREAKING` / `ERROR` / `OK` verdict (and a `--json` mode for CI).
+It ends with a `BREAKING` / `ERROR` / `OK` verdict. `--json` emits machine-readable output for CI and agents.
+
+`ziff` materializes the baseline and head refs in disposable detached worktrees
+under a per-run temp directory. Public API builds use target dirs in that temp
+directory, so the invoking checkout's HEAD, branch, index, working tree, and
+`Cargo.lock` are not checked out over or built in. The worktrees are removed on exit.
 
 ## Install
 
@@ -68,6 +75,49 @@ ziff --changelog main      # draft a librustzcash-style changelog (markdown)
 ```
 
 Run `ziff --help` for the full option and output reference.
+
+### `--json`
+
+`--json` writes a single JSON document to stdout. Progress and diagnostics go to
+stderr.
+
+Top-level fields:
+
+- `verdict`: `ok`, `breaking`, or `error`
+- `totals`: API, dependency, value, doc, and error counts
+- `deps`, `values`, `docs`: structured diff details
+- `crates`: one entry per workspace crate, sorted by crate name
+
+A crate error has this shape:
+
+```json
+{
+  "name": "zebra-state",
+  "removed": 0,
+  "changed": 0,
+  "added": 0,
+  "status": "error",
+  "error": {
+    "stage": "head_build",
+    "ref": "HEAD",
+    "ref_sha": "abc123...",
+    "command": "cargo public-api --all-features -p zebra-state -ss",
+    "stderr": "... tail of the underlying tool stderr ...",
+    "hint": "The crate did not compile under the selected feature set. Fix the build or choose a supported feature policy."
+  }
+}
+```
+
+`stage` is one of `baseline_build`, `head_build`, or `diff`. `command` never
+uses cargo-public-api's git ref-diff form. Build errors show the single-ref
+command to run in a checkout of `ref_sha`; diff errors show the rustdoc JSON
+diff form.
+
+JSON consumers should treat `verdict: error` as an inconclusive analysis. ziff
+keeps the `--all-features` policy for the public API diff and does not fall back
+to default features automatically, because doing so can hide feature-gated public
+API. Crates whose all-features surface cannot be documented must be fixed,
+excluded outside ziff, or handled by a caller with an explicit feature policy.
 
 ### `--changelog`
 
@@ -141,16 +191,19 @@ Then ask Claude to "produce the changelog for PR #N" (or invoke `/changelog N`).
 
 ## Requirements
 
-- Bash 4+ (associative arrays)
+- Bash 4+ (associative arrays). On macOS, ziff tries to re-exec with `bash` from PATH, `/opt/homebrew/bin/bash`, or `/usr/local/bin/bash` before failing. Install it with `brew install bash`.
 - [`cargo-public-api`](https://github.com/cargo-public-api/cargo-public-api)
 - `jq`
-- a `nightly` toolchain — only for `--with-values` and `--changelog`
+- a `nightly` toolchain for rustdoc JSON builds
 
 ## Exit codes
 
-- `0` — no breaking changes (additive changes are fine)
-- `1` — breaking changes detected, `cargo public-api` failed for a crate, or a
-  runtime error
+- `0` means clean: no breaking API, dependency, or value changes were found.
+- `1` means breaking changes were detected.
+- `2` means analysis error: ziff could not produce a trustworthy verdict. This
+  includes `cargo public-api` or rustdoc failures for one or more crates.
+- `64` means usage or setup error, such as an unknown option, bad ref, missing
+  required tool, or unsupported shell.
 
 ## License
 

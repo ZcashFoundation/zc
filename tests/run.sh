@@ -21,6 +21,24 @@ bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail + 1)); }
 assert_eq()       { if [ "$1" = "$2" ]; then ok "$3"; else bad "$3 (got '$1', want '$2')"; fi; }
 assert_contains() { case "$1" in *"$2"*) ok "$3" ;; *) bad "$3 (output missing: $2)" ;; esac; }
 
+worktree_count() {
+    git -C "$1" worktree list --porcelain | grep -c '^worktree '
+}
+
+assert_repo_unchanged() { # $1=repo  $2=head  $3=status  $4=branch  $5=worktrees  $6=label
+    local repo=$1 before_head=$2 before_status=$3 before_branch=$4 before_worktrees=$5 label=$6
+    local after_head after_status after_branch after_worktrees
+    after_head=$(git -C "$repo" rev-parse HEAD)
+    after_status=$(git -C "$repo" status --porcelain)
+    after_branch=$(git -C "$repo" branch --show-current)
+    after_worktrees=$(worktree_count "$repo")
+
+    assert_eq "$after_head" "$before_head" "$label: HEAD unchanged"
+    assert_eq "$after_status" "$before_status" "$label: status unchanged"
+    assert_eq "$after_branch" "$before_branch" "$label: branch unchanged"
+    assert_eq "$after_worktrees" "$before_worktrees" "$label: no stale worktrees"
+}
+
 # new_repo <lib.rs contents> -> prints the repo dir.
 # Creates a single-crate cargo lib in a fresh git repo with a committed lockfile.
 new_repo() {
@@ -29,6 +47,7 @@ new_repo() {
     git -C "$d" init -q
     git -C "$d" config user.email t@t
     git -C "$d" config user.name t
+    git -C "$d" config commit.gpgsign false
     printf '/target\n' >"$d/.gitignore"
     cat >"$d/Cargo.toml" <<'EOF'
 [package]
@@ -58,10 +77,15 @@ echo "ziff integration tests ($ZIFF)"
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap foo -> bar')
+before_head=$(git -C "$repo" rev-parse HEAD)
+before_status=$(git -C "$repo" status --porcelain)
+before_branch=$(git -C "$repo" branch --show-current)
+before_worktrees=$(worktree_count "$repo")
 out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
 assert_eq "$rc" 1 "removed pub fn: exit 1"
 assert_contains "$out" "BREAKING" "removed pub fn: BREAKING verdict"
 assert_contains "$out" "foo" "removed pub fn: names the removed item"
+assert_repo_unchanged "$repo" "$before_head" "$before_status" "$before_branch" "$before_worktrees" "removed pub fn: repository isolation"
 rm -rf "$repo"
 
 # 2) A pure addition is OK.
@@ -83,13 +107,68 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap')
-json=$( cd "$repo" && "$ZIFF" --json "$base" "$head" 2>/dev/null )
+json=$( cd "$repo" && "$ZIFF" --json "$base" "$head" 2>/dev/null ); rc=$?
+assert_eq "$rc" 1 "--json: breaking changes exit 1"
 if printf '%s' "$json" | jq -e 'has("totals") and has("crates") and .verdict == "breaking"' >/dev/null 2>&1; then
     ok "--json: valid shape, verdict=breaking"
 else
-    bad "--json: expected {totals, crates, verdict:breaking}, got: $(printf '%s' "$json" | head -c 120)"
+    bad "--json: expected verdict:breaking, got: $(printf '%s' "$json" | head -c 120)"
 fi
 rm -rf "$repo"
+
+# 4b) A crate that fails to document exits 2 and carries structured error data.
+repo=$(new_repo 'pub fn foo() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" $'compile_error!("ziff fixture build failure");\npub fn foo() {}' 'break docs')
+before_head=$(git -C "$repo" rev-parse HEAD)
+before_status=$(git -C "$repo" status --porcelain)
+before_branch=$(git -C "$repo" branch --show-current)
+before_worktrees=$(worktree_count "$repo")
+json=$( cd "$repo" && "$ZIFF" --json "$base" "$head" 2>/dev/null ); rc=$?
+assert_eq "$rc" 2 "--json: analysis error exits 2"
+if printf '%s' "$json" | jq -e '
+    .verdict == "error" and
+    .totals.error_crates == 1 and
+    .crates[0].status == "error" and
+    .crates[0].error.stage == "head_build" and
+    (.crates[0].error.stderr | contains("ziff fixture build failure")) and
+    (.crates[0].error.hint | length > 0)
+' >/dev/null 2>&1; then
+    ok "--json: structured crate error includes stage, stderr, hint"
+else
+    bad "--json: missing structured error fields, got: $(printf '%s' "$json" | head -c 240)"
+fi
+assert_repo_unchanged "$repo" "$before_head" "$before_status" "$before_branch" "$before_worktrees" "--json error: repository isolation"
+before_head=$(git -C "$repo" rev-parse HEAD)
+before_status=$(git -C "$repo" status --porcelain)
+before_branch=$(git -C "$repo" branch --show-current)
+before_worktrees=$(worktree_count "$repo")
+out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+assert_eq "$rc" 2 "human error: analysis error exits 2"
+assert_contains "$out" "stage: head_build" "human error: shows failing stage"
+assert_contains "$out" "ziff fixture build failure" "human error: shows stderr tail"
+assert_repo_unchanged "$repo" "$before_head" "$before_status" "$before_branch" "$before_worktrees" "human error: repository isolation"
+before_head=$(git -C "$repo" rev-parse HEAD)
+before_status=$(git -C "$repo" status --porcelain)
+before_branch=$(git -C "$repo" branch --show-current)
+before_worktrees=$(worktree_count "$repo")
+changelog_stdout_file=$(mktemp)
+changelog_stderr_file=$(mktemp)
+( cd "$repo" && "$ZIFF" --changelog "$base" "$head" >"$changelog_stdout_file" 2>"$changelog_stderr_file" ); rc=$?
+changelog_stdout=$(cat "$changelog_stdout_file")
+changelog_stderr=$(cat "$changelog_stderr_file")
+rm -f "$changelog_stdout_file" "$changelog_stderr_file"
+assert_eq "$rc" 2 "--changelog error: analysis error exits 2"
+assert_eq "$changelog_stdout" "" "--changelog error: stdout empty"
+assert_contains "$changelog_stderr" "stage: head_build" "--changelog error: stderr shows failing stage"
+assert_contains "$changelog_stderr" "ziff_fixture" "--changelog error: stderr names failing crate"
+assert_repo_unchanged "$repo" "$before_head" "$before_status" "$before_branch" "$before_worktrees" "--changelog error: repository isolation"
+rm -rf "$repo"
+
+# 4c) Usage errors use a distinct code.
+out=$( "$ZIFF" --definitely-not-a-ziff-option 2>&1 ); rc=$?
+assert_eq "$rc" 64 "usage error: exit 64"
+assert_contains "$out" "unknown option" "usage error: explains the option failure"
 
 # 5) The default baseline is the BRANCH POINT (merge-base with the parent), not
 #    the parent's tip: API changes merged onto the parent *after* we branched
@@ -246,6 +325,7 @@ printf 'pub trait Ext { fn tag(&self) -> u8; }\nimpl Ext for dep::Foo { fn tag(&
 git -C "$ws" init -q
 git -C "$ws" config user.email t@t
 git -C "$ws" config user.name t
+git -C "$ws" config commit.gpgsign false
 ( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
 git -C "$ws" add -A
 git -C "$ws" commit -qm base
@@ -322,6 +402,7 @@ echo 'pub fn placeholder() {}' >"$ws/ziff_fixture/src/lib.rs"
 git -C "$ws" init -q
 git -C "$ws" config user.email t@t
 git -C "$ws" config user.name t
+git -C "$ws" config commit.gpgsign false
 ( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
 git -C "$ws" add -A
 git -C "$ws" commit -qm base
@@ -369,7 +450,7 @@ rm -rf "$repo"
 
 # 6n) An MSRV (rust-version) bump is documented under ### Changed.
 repo=$(mktemp -d)
-git -C "$repo" init -q; git -C "$repo" config user.email t@t; git -C "$repo" config user.name t
+git -C "$repo" init -q; git -C "$repo" config user.email t@t; git -C "$repo" config user.name t; git -C "$repo" config commit.gpgsign false
 printf '/target\n' >"$repo/.gitignore"
 printf '[package]\nname = "ziff_fixture"\nversion = "0.1.0"\nedition = "2021"\nrust-version = "1.70"\n' >"$repo/Cargo.toml"
 mkdir -p "$repo/src"; echo 'pub fn f() {}' >"$repo/src/lib.rs"

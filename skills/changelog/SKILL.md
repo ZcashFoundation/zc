@@ -45,9 +45,11 @@ reports discrepancies against ziff and writes nothing, the fast pre-PR gate.
 ### 2. Run ziff
 - Current branch: `ziff --changelog`.
 - Explicit refs: `ziff --changelog $(git merge-base <base> <head>) <head>`.
-- ziff runs a full `cargo public-api` build, so run it where builds are fast. A
-  flaky build can exit non-zero; rerun to confirm before treating it as a real
-  failure.
+- ziff runs a full `cargo public-api` build with `--all-features`. Run it where
+  builds are fast, such as a remote build host for large workspaces.
+- Exit `1` means ziff found breaking changes and can still draft a changelog.
+  Exit `2` means analysis failed for at least one crate; do not curate the
+  changelog until the reported stage, stderr, and hint are resolved.
 - An empty draft is a valid result: no public API changed, so there are no
   `### Added`/`### Changed`/`### Removed` entries to write. A `### Fixed`,
   `### Deprecated`, or `### Security` entry may still come from the PR (step 4).
