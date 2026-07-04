@@ -30,6 +30,20 @@ under a per-run temp directory. Public API builds use target dirs in that temp
 directory, so the invoking checkout's HEAD, branch, index, working tree, and
 `Cargo.lock` are not checked out over or built in. The worktrees are removed on exit.
 
+## Cache
+
+ziff stores persistent cache files under `target/ziff-cache/`, or under
+`$CARGO_TARGET_DIR/ziff-cache/` when `CARGO_TARGET_DIR` is set. The cache includes
+resolved dependency summaries, derived value/doc and trait-map indexes, and
+per-ref per-crate rustdoc JSON for public API analysis.
+
+Rustdoc JSON cache entries are keyed by commit SHA, crate name,
+`cargo-public-api` version, nightly `rustc` version, and the feature policy used
+for the run. Working-tree snapshots are not written to the rustdoc JSON cache.
+ziff removes `*.api.json` files older than 14 days at startup. Delete
+`target/ziff-cache/` with `rm -rf target/ziff-cache` to clear all ziff cache
+state for a checkout.
+
 ## Install
 
 First install the prerequisites (see [Requirements](#requirements)):

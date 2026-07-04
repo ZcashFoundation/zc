@@ -77,8 +77,7 @@
 #                    fully-qualified, one-item-per-line list.
 #   --with-values    Also diff public const/static values and doc text via
 #                    rustdoc JSON. Catches changes cargo-public-api can't see
-#                    (it is signature-only). Roughly doubles the rustdoc work,
-#                    hence opt-in.
+#                    because it is signature-only.
 #   --changelog      Emit a librustzcash-style changelog (markdown) on stdout
 #                    instead of the diff: one `## <crate>` section per changed
 #                    crate, with `### Added`/`### Changed`/`### Removed` lists
@@ -162,14 +161,12 @@
 #   With --json a single JSON document is printed instead (schema above).
 #
 # ENVIRONMENT
-#   CARGO_TARGET_DIR   Used as the root for the dep-dump cache. When unset,
-#                      `target/ziff-cache/` is used. Cache entries are
-#                      keyed on the resolved baseline SHA plus a hash of
-#                      this script, so edits to the dep-diff logic
-#                      automatically invalidate prior caches. With --with-values
-#                      an additional persistent `<cache>/values-target/` holds
-#                      the shared rustdoc target tree; it is not cleaned on exit
-#                      and may grow large — delete it to reclaim space.
+#   CARGO_TARGET_DIR   Used as the root for ziff's cache. When unset,
+#                      `target/ziff-cache/` is used. Dependency and derived
+#                      TSV caches are keyed on the resolved ref SHA plus a hash
+#                      of this script. Rustdoc JSON is keyed on ref SHA, crate,
+#                      cargo-public-api version, nightly rustc version, and
+#                      feature policy.
 #   ZIFF_TOOLCHAIN     Nightly toolchain name used to build rustdoc JSON.
 #                      Defaults to the first installed `nightly*` toolchain.
 #   NO_COLOR           When set to any non-empty value, disables ANSI
@@ -675,6 +672,30 @@ else
     SCRIPT_HASH="v${ZIFF_VERSION}"
 fi
 mkdir -p "$CACHE_DIR" 2>/dev/null || true
+CACHE_DIR=$(cd "$CACHE_DIR" 2>/dev/null && pwd -P) || {
+    echo "${RED}error:${RESET} failed to resolve ziff cache directory" >&2
+    exit "$EXIT_USAGE"
+}
+
+cargo_public_api_version=$(cargo public-api --version 2>/dev/null) || {
+    echo "${RED}error:${RESET} cargo-public-api failed during version detection" >&2
+    exit "$EXIT_USAGE"
+}
+rustc_version=$(rustc +"$nightly_toolchain" --version 2>/dev/null) || {
+    echo "${RED}error:${RESET} selected nightly toolchain '$nightly_toolchain' cannot run rustc" >&2
+    exit "$EXIT_USAGE"
+}
+api_fp_input=$(mktemp -p "$CACHE_DIR" api-fingerprint.XXXXXX) || {
+    echo "${RED}error:${RESET} failed to create ziff cache fingerprint input" >&2
+    exit "$EXIT_USAGE"
+}
+{
+    printf '%s\n' "$cargo_public_api_version"
+    printf '%s\n' "$rustc_version"
+    printf '%s\n' "${feature_args[@]}"
+} >"$api_fp_input"
+API_FP=$(sha1_short "$api_fp_input")
+rm -f "$api_fp_input"
 
 # Per-run temp directory for worktrees; cleaned on exit. Each worktree gets
 # a unique subdir under here, so a single EXIT trap handles all of them
@@ -696,12 +717,15 @@ cleanup_run_tmp() {
 }
 trap cleanup_run_tmp EXIT
 git worktree prune >/dev/null 2>&1 || true
+find "$CACHE_DIR" -maxdepth 1 -type f -name '*.api.json' -mtime +14 -delete >/dev/null 2>&1 || true
 
 # If we deferred head_ref resolution (worktree-snapshot mode), do it now that
 # RUN_TMP exists. The synthesized commit object is parented at HEAD and contains
 # the working tree's tracked + untracked + staged contents.
+head_is_worktree_snapshot=false
 if [ -z "$head_ref" ]; then
     head_ref=$(worktree_snapshot_commit) || exit "$EXIT_ANALYSIS"
+    head_is_worktree_snapshot=true
 fi
 
 head_short=$(git rev-parse --short "$head_ref" 2>/dev/null || echo "$head_ref")
@@ -996,10 +1020,10 @@ dump_per_crate_deps() { # $1=ref -> stdout TSV
 # results are cached on ref-SHA + script hash.
 dump_trait_map() { # $1=ref  $2..=crate names  -> stdout TSV: self member trait
     local ref=$1; shift
-    local sha wt target json crate cache_file cache_tmp idx=0 total=$#
+    local sha wt target json crate cache_file cache_tmp err_file idx=0 total=$#
     [ -z "${nightly_toolchain:-}" ] && return 0
     sha=$(git rev-parse --verify "$ref" 2>/dev/null) || return 0
-    target="$CACHE_DIR/trait-target"; mkdir -p "$target" 2>/dev/null || true
+    target="$RUN_TMP/trait-target"; mkdir -p "$target" 2>/dev/null || true
     wt=$(mktemp -d -p "$RUN_TMP")
     git worktree add --detach --quiet "$wt" "$ref" 2>/dev/null || return 0
     for crate in "$@"; do
@@ -1007,10 +1031,9 @@ dump_trait_map() { # $1=ref  $2..=crate names  -> stdout TSV: self member trait
         cache_file="$CACHE_DIR/${sha}.${SCRIPT_HASH}.${crate}.traitmap.tsv"
         if [ -f "$cache_file" ]; then cat "$cache_file"; continue; fi
         progress "--changelog: trait map [$idx/$total] $crate"
-        if CARGO_TARGET_DIR="$target" cargo +"$nightly_toolchain" rustdoc -q \
-            --manifest-path "$wt/Cargo.toml" -p "$crate" --lib "${feature_args[@]}" \
-            -- -Z unstable-options --output-format json >/dev/null 2>&1; then
-            json="$target/doc/${crate//-/_}.json"
+        err_file="$RUN_TMP/${crate}.traitmap.err"
+        if run_public_api_rustdoc "$crate" "$wt" "$target" "$err_file" "$sha"; then
+            json=$PUBLIC_API_JSON_RESULT
             if [ -f "$json" ]; then
                 cache_tmp=$(mktemp -p "$CACHE_DIR" "${sha}.${SCRIPT_HASH}.${crate}.traitmap.XXXXXX") || continue
                 jq -r "$TRAIT_MAP_JQ" "$json" 2>/dev/null | sort -u >"$cache_tmp" || : >"$cache_tmp"
@@ -1526,7 +1549,16 @@ public_api_command() {
     local crate=$1 stage=$2
     case "$stage" in
     baseline_build | head_build) printf 'cargo public-api %s -p %s -ss' "${feature_args[*]}" "$crate" ;;
-    *) printf 'cargo public-api %s -ss diff first.json second.json' "${feature_args[*]}" ;;
+    *)
+        local first_ref second_ref first_sha second_sha
+        first_ref=${PUBLIC_API_ERROR_REF%%..*}
+        second_ref=${PUBLIC_API_ERROR_REF#*..}
+        first_sha=${PUBLIC_API_ERROR_REF_SHA%%..*}
+        second_sha=${PUBLIC_API_ERROR_REF_SHA#*..}
+        printf 'run at %s (%s): cargo public-api %s -p %s -ss; run at %s (%s): cargo public-api %s -p %s -ss' \
+            "$first_ref" "$first_sha" "${feature_args[*]}" "$crate" \
+            "$second_ref" "$second_sha" "${feature_args[*]}" "$crate"
+        ;;
     esac
 }
 
@@ -1553,13 +1585,52 @@ public_api_json_path() { # $1=crate  $2=target-dir
     printf '%s/doc/%s.json' "$2" "${1//-/_}"
 }
 
-run_public_api_rustdoc() { # $1=crate  $2=worktree  $3=target-dir  $4=err-file
-    local crate=$1 wt=$2 target=$3 err_file=$4 json
+api_json_cache_file() { # $1=ref-sha  $2=crate
+    printf '%s/%s.%s.%s.api.json' "$CACHE_DIR" "$1" "$API_FP" "$2"
+}
+
+api_json_cacheable() { # $1=ref-sha
+    [ "$head_is_worktree_snapshot" != true ] || [ "$1" != "$head_sha" ]
+}
+
+cached_api_json() { # $1=ref-sha  $2=crate  -> stdout path
+    local cache_file
+    cache_file=$(api_json_cache_file "$1" "$2")
+    if [ -s "$cache_file" ] && jq -e 'has("format_version") and has("root") and has("index")' "$cache_file" >/dev/null 2>&1; then
+        touch "$cache_file" 2>/dev/null || true
+        printf '%s' "$cache_file"
+        return 0
+    fi
+    return 1
+}
+
+store_api_json_cache() { # $1=ref-sha  $2=crate  $3=json
+    local sha=$1 crate=$2 json=$3 cache_file cache_tmp
+    cache_file=$(api_json_cache_file "$sha" "$crate")
+    cache_tmp=$(mktemp -p "$CACHE_DIR" "${sha}.${API_FP}.${crate}.api.XXXXXX") || return 0
+    if cp "$json" "$cache_tmp" 2>/dev/null; then
+        mv -f "$cache_tmp" "$cache_file" 2>/dev/null || rm -f "$cache_tmp"
+    else
+        rm -f "$cache_tmp"
+    fi
+}
+
+run_public_api_rustdoc() { # $1=crate  $2=worktree  $3=target-dir  $4=err-file  $5=ref-sha
+    local crate=$1 wt=$2 target=$3 err_file=$4 sha=$5 json
+    PUBLIC_API_JSON_RESULT=""
+    if api_json_cacheable "$sha" && json=$(cached_api_json "$sha" "$crate"); then
+        PUBLIC_API_JSON_RESULT=$json
+        return 0
+    fi
     if CARGO_TARGET_DIR="$target" cargo +"$nightly_toolchain" rustdoc -q \
         --manifest-path "$wt/Cargo.toml" -p "$crate" --lib "${feature_args[@]}" \
         -- -Z unstable-options --output-format json >/dev/null 2>"$err_file"; then
         json=$(public_api_json_path "$crate" "$target")
         if [ -f "$json" ]; then
+            PUBLIC_API_JSON_RESULT=$json
+            if api_json_cacheable "$sha"; then
+                store_api_json_cache "$sha" "$crate" "$json"
+            fi
             return 0
         fi
         printf 'rustdoc did not produce %s\n' "$json" >"$err_file"
@@ -1603,19 +1674,27 @@ for i in "${!all_crates[@]}"; do
     base_err_file="$RUN_TMP/${crate_name}.baseline.err"
     head_err_file="$RUN_TMP/${crate_name}.head.err"
     err_file="$RUN_TMP/${crate_name}.diff.err"
-    base_json=$(public_api_json_path "$crate_name" "$api_baseline_target")
-    head_json=$(public_api_json_path "$crate_name" "$api_head_target")
     public_api_failed=false
 
-    if ! run_public_api_rustdoc "$crate_name" "$api_baseline_worktree" "$api_baseline_target" "$base_err_file"; then
+    if ! run_public_api_rustdoc "$crate_name" "$api_baseline_worktree" "$api_baseline_target" "$base_err_file" "$baseline_sha"; then
         public_api_failed=true
         record_public_api_failure "$crate_name" baseline_build "$baseline_label" "$baseline_sha" "$base_err_file"
-    elif ! run_public_api_rustdoc "$crate_name" "$api_head_worktree" "$api_head_target" "$head_err_file"; then
-        public_api_failed=true
-        record_public_api_failure "$crate_name" head_build "$head_label" "$head_sha" "$head_err_file"
-    elif ! output=$(cd "$RUN_TMP" && cargo public-api "${feature_args[@]}" -p "$crate_name" -ss diff "$base_json" "$head_json" 2>"$err_file"); then
-        public_api_failed=true
-        record_public_api_failure "$crate_name" diff "$baseline_label..$head_label" "$baseline_sha..$head_sha" "$err_file"
+    else
+        base_json=$PUBLIC_API_JSON_RESULT
+    fi
+    if ! $public_api_failed; then
+        if ! run_public_api_rustdoc "$crate_name" "$api_head_worktree" "$api_head_target" "$head_err_file" "$head_sha"; then
+            public_api_failed=true
+            record_public_api_failure "$crate_name" head_build "$head_label" "$head_sha" "$head_err_file"
+        else
+            head_json=$PUBLIC_API_JSON_RESULT
+        fi
+    fi
+    if ! $public_api_failed; then
+        if ! output=$(cd "$RUN_TMP" && cargo public-api "${feature_args[@]}" -p "$crate_name" -ss diff "$base_json" "$head_json" 2>"$err_file"); then
+            public_api_failed=true
+            record_public_api_failure "$crate_name" diff "$baseline_label..$head_label" "$baseline_sha..$head_sha" "$err_file"
+        fi
     fi
 
     if $public_api_failed; then
@@ -1728,7 +1807,7 @@ fi
 # (e.g. 99 -> 1000) or a public item whose doc-comment text changes shows as
 # "no change". With --with-values we additionally build rustdoc JSON for every
 # crate at both refs and diff the evaluated const/static values and the doc
-# text. This roughly doubles the rustdoc work, hence opt-in.
+# text. The rustdoc JSON is shared with the public API diff when possible.
 value_changed_total=0
 doc_changed_total=0
 declare -a value_changes=()
@@ -1744,8 +1823,7 @@ if $with_values; then
     if [ -z "$nightly_toolchain" ]; then
         echo "${YELLOW}warning:${RESET} --with-values needs a nightly toolchain for rustdoc JSON; skipping value/doc diff" >&2
     else
-        # Shared target dir so deps compile once and cache across refs/runs.
-        values_target="$CACHE_DIR/values-target"
+        values_target="$RUN_TMP/values-target"
         mkdir -p "$values_target" 2>/dev/null || true
 
         # Emit one TSV row per public const/static value and doc-bearing item in
@@ -1784,7 +1862,7 @@ if $with_values; then
         # Build rustdoc JSON for every workspace crate at $ref and emit the
         # combined V/D rows. Cached on ref-SHA + script hash, like the dep dump.
         dump_value_doc_index() { # $1=ref  $2=ref-label  -> stdout TSV
-            local ref=$1 ref_label=$2 sha cache_file wt tmp_out crate json failed=0 idx=0
+            local ref=$1 ref_label=$2 sha cache_file wt tmp_out crate json err_file failed=0 idx=0
             sha=$(git rev-parse --verify "$ref" 2>/dev/null) || return 1
             cache_file="$CACHE_DIR/${sha}.${SCRIPT_HASH}.values.tsv"
             if [ -s "$cache_file" ]; then cat "$cache_file"; return 0; fi
@@ -1798,10 +1876,9 @@ if $with_values; then
                 [ -z "$crate" ] && continue
                 idx=$((idx + 1))
                 progress "--with-values: rustdoc JSON [$ref_label $idx/$crate_count] $crate"
-                if CARGO_TARGET_DIR="$values_target" cargo +"$nightly_toolchain" rustdoc -q \
-                    --manifest-path "$wt/Cargo.toml" -p "$crate" --lib "${feature_args[@]}" \
-                    -- -Z unstable-options --output-format json >/dev/null 2>&1; then
-                    json="$values_target/doc/${crate//-/_}.json"
+                err_file="$RUN_TMP/${crate}.${ref_label}.values.err"
+                if run_public_api_rustdoc "$crate" "$wt" "$values_target" "$err_file" "$sha"; then
+                    json=$PUBLIC_API_JSON_RESULT
                     { [ -f "$json" ] && extract_value_doc "$json" "$crate" >>"$tmp_out"; } || true
                 else
                     # A crate that fails to build rustdoc JSON must not poison

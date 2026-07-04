@@ -21,6 +21,26 @@ bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail + 1)); }
 assert_eq()       { if [ "$1" = "$2" ]; then ok "$3"; else bad "$3 (got '$1', want '$2')"; fi; }
 assert_contains() { case "$1" in *"$2"*) ok "$3" ;; *) bad "$3 (output missing: $2)" ;; esac; }
 
+api_cache_file() { # $1=repo  $2=sha  $3=crate
+    local repo=$1 sha=$2 crate=$3
+    local cache_dir=$repo/target/ziff-cache
+    local file found="" count=0
+    [ -d "$cache_dir" ] || return 1
+    while IFS= read -r file; do
+        found=$file
+        count=$((count + 1))
+    done < <(find "$cache_dir" -maxdepth 1 -type f -name "${sha}.*.${crate}.api.json" | sort)
+    [ "$count" -eq 1 ] || return 1
+    printf '%s' "$found"
+}
+
+api_cache_count_for_sha() { # $1=repo  $2=sha
+    local repo=$1 sha=$2
+    local cache_dir=$repo/target/ziff-cache
+    [ -d "$cache_dir" ] || { printf '0'; return; }
+    find "$cache_dir" -maxdepth 1 -type f -name "${sha}.*.api.json" | wc -l | tr -d ' '
+}
+
 worktree_count() {
     git -C "$1" worktree list --porcelain | grep -c '^worktree '
 }
@@ -579,6 +599,98 @@ case "$out" in
 *Foo*|*'m::g'*) bad "--changelog: contents of an added module should be subsumed" ;;
 *) ok "--changelog: added module subsumes its contents" ;;
 esac
+rm -rf "$repo"
+
+# 7) A cached rustdoc JSON hit is used as the diff input.
+repo=$(new_repo 'pub fn foo() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap foo -> bar')
+out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+assert_eq "$rc" 1 "api cache hit: initial diff exit 1"
+base_cache=$(api_cache_file "$repo" "$base" ziff_fixture) || base_cache=""
+head_cache=$(api_cache_file "$repo" "$head" ziff_fixture) || head_cache=""
+if [ -n "$base_cache" ] && [ -n "$head_cache" ]; then
+    ok "api cache hit: populated both ref cache files"
+    if cp "$base_cache" "$head_cache"; then
+        out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+        assert_eq "$rc" 0 "api cache hit: tampered cache consumed"
+        assert_contains "$out" "No public API changes" "api cache hit: tampered cache hides diff"
+    else
+        bad "api cache hit: could not tamper head cache"
+    fi
+else
+    bad "api cache hit: expected baseline and head cache files"
+fi
+rm -rf "$repo"
+
+# 8) Startup GC removes old rustdoc JSON cache entries and keeps fresh ones.
+repo=$(new_repo 'pub fn foo() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+cache_dir="$repo/target/ziff-cache"
+mkdir -p "$cache_dir"
+old_cache="$cache_dir/old.fp.ziff_fixture.api.json"
+fresh_cache="$cache_dir/fresh.fp.ziff_fixture.api.json"
+printf '%s\n' '{}' >"$old_cache"
+printf '%s\n' '{}' >"$fresh_cache"
+touch -t 200001010000 "$old_cache"
+( cd "$repo" && "$ZIFF" "$base" "$base" >/dev/null 2>&1 ); rc=$?
+assert_eq "$rc" 0 "api cache gc: ziff run succeeds"
+if [ ! -e "$old_cache" ]; then
+    ok "api cache gc: old api json removed"
+else
+    bad "api cache gc: old api json survived"
+fi
+if [ -e "$fresh_cache" ]; then
+    ok "api cache gc: fresh api json survives"
+else
+    bad "api cache gc: fresh api json removed"
+fi
+rm -rf "$repo"
+
+# 9) Dirty working-tree snapshots are not written to the rustdoc JSON cache.
+repo=$(new_repo 'pub fn foo() {}')
+printf '%s\n' 'pub fn bar() {}' >"$repo/src/lib.rs"
+json=$( cd "$repo" && "$ZIFF" --json 2>/dev/null ); rc=$?
+assert_eq "$rc" 1 "snapshot api cache: dirty diff exit 1"
+snapshot_short=$(printf '%s' "$json" | jq -r '.head_sha // empty')
+snapshot_sha=$(git -C "$repo" rev-parse --verify "${snapshot_short}^{commit}" 2>/dev/null || true)
+if [ -n "$snapshot_sha" ]; then
+    snapshot_cache_count=$(api_cache_count_for_sha "$repo" "$snapshot_sha")
+    assert_eq "$snapshot_cache_count" 0 "snapshot api cache: no snapshot api json entries"
+else
+    bad "snapshot api cache: could not resolve snapshot sha"
+fi
+rm -rf "$repo"
+
+# 10) Corrupt rustdoc JSON cache entries are ignored, rebuilt, and overwritten.
+repo=$(new_repo 'pub fn foo() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap foo -> bar')
+out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+assert_eq "$rc" 1 "corrupt api cache: initial diff exit 1"
+head_cache=$(api_cache_file "$repo" "$head" ziff_fixture) || head_cache=""
+if [ -n "$head_cache" ]; then
+    printf '%s\n' 'not json' >"$head_cache"
+    out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+    assert_eq "$rc" 1 "corrupt api cache: rebuild preserves verdict"
+    assert_contains "$out" "BREAKING" "corrupt api cache: breaking verdict retained"
+    if jq -e . "$head_cache" >/dev/null 2>&1; then
+        ok "corrupt api cache: overwritten with valid JSON"
+    else
+        bad "corrupt api cache: cache was not overwritten with JSON"
+    fi
+    printf '%s\n' '{}' >"$head_cache"
+    out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+    assert_eq "$rc" 1 "empty-object api cache: rebuild preserves verdict"
+    assert_contains "$out" "BREAKING" "empty-object api cache: breaking verdict retained"
+    if jq -e 'has("format_version") and has("root") and has("index")' "$head_cache" >/dev/null 2>&1; then
+        ok "empty-object api cache: overwritten with rustdoc JSON"
+    else
+        bad "empty-object api cache: cache was not overwritten with rustdoc JSON"
+    fi
+else
+    bad "corrupt api cache: expected head cache file"
+fi
 rm -rf "$repo"
 
 echo ""
