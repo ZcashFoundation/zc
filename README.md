@@ -135,7 +135,7 @@ excluded outside ziff, or handled by a caller with an explicit feature policy.
 
 ### `--changelog`
 
-`--changelog` drafts a [librustzcash](https://github.com/zcash/librustzcash)/Zebra-style
+`--changelog` drafts a [librustzcash](https://github.com/zcash/librustzcash)-style
 changelog (markdown) instead of the diff: one `## <crate>` section per changed
 crate, with `### Added` / `### Changed` / `### Removed` lists.
 
@@ -190,9 +190,11 @@ two-ref comparison (`ziff v4.1.0 v4.2.0`) is always taken literally.
 `skills/changelog/` bundles a [Claude Code](https://claude.com/claude-code) skill
 that drives the full "draft a changelog for a PR" workflow: it runs
 `ziff --changelog` against the PR's branch point and curates the draft into
-librustzcash/Zebra-style `CHANGELOG.md` entries (prose `### Changed`, periods only
-on prose bullets, `### Breaking Changes` for new variants on non-`#[non_exhaustive]`
-enums, merged into the existing `[Unreleased]` section).
+[librustzcash](https://github.com/zcash/librustzcash)-style `CHANGELOG.md` entries
+(Keep a Changelog sections in `Added`/`Changed`/`Deprecated`/`Removed`/`Fixed`/`Security`
+order — no `### Breaking Changes` section; breaking changes live under `### Changed`/
+`### Removed` as prose, periods only on prose bullets), merged into the existing
+`[Unreleased]` section.
 
 Install it for use in any repo by linking it into your personal skills dir:
 

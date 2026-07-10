@@ -1,17 +1,17 @@
 ---
 name: changelog
 description: >-
-  Produce librustzcash/Zebra-style CHANGELOG entries for the current branch (or a
+  Produce librustzcash-style CHANGELOG entries for the current branch (or a
   given PR/branch) by running ziff and writing them into the repo's CHANGELOG.md
   files; or, with --check, verify the existing entries against ziff and report
   discrepancies without writing. Use when the user asks to write/draft/produce or
   check/verify a changelog for a branch or PR, or turn a ziff diff into entries.
 ---
 
-# Produce librustzcash/Zebra-style changelogs with ziff
+# Produce librustzcash-style changelogs with ziff
 
 Run `ziff --changelog`, curate its draft into
-[librustzcash](https://github.com/zcash/librustzcash)/Zebra-style entries, and
+[librustzcash](https://github.com/zcash/librustzcash)-style entries, and
 **write them into the repo's `CHANGELOG.md` files**. Needs `ziff` on `PATH` (plus
 its prereqs: `cargo-public-api`, `jq`, a nightly toolchain).
 
@@ -25,8 +25,9 @@ ziff --changelog
 
 ziff prints per-crate `## <crate>` sections holding `### Added/Changed/Removed`
 bullets, paths already crate-relative and type members brace-grouped. Treat that
-output as a **draft**: classify breaking changes (step 3), sort the rest into
-sections (step 4), then write the result into the matching `CHANGELOG.md` files.
+output as a **draft**: place breaking changes in their natural section (step 3),
+sort into sections (step 4), then write the result into the matching `CHANGELOG.md`
+files.
 
 To verify existing entries instead of writing them, use `--check` (last section): it
 reports discrepancies against ziff and writes nothing, the fast pre-PR gate.
@@ -54,37 +55,39 @@ reports discrepancies against ziff and writes nothing, the fast pre-PR gate.
   `### Added`/`### Changed`/`### Removed` entries to write. A `### Fixed`,
   `### Deprecated`, or `### Security` entry may still come from the PR (step 4).
 
-### 3. Classify breaking changes
-Put every breaking item under `### Breaking Changes` with a trailing
-`(breaking; needs a major version bump)` gloss. By the priority in step 4, Breaking
-Changes outranks Removed, Changed, and Added, so a breaking item lives there, not in
-the section ziff drafted it under. Breaking items come from all three ziff sections:
-- **Removed**: removing any public item is breaking.
-- **Changed**: a changed signature, parameter list, field, or type is breaking.
-- **Added**: most additions are safe, but each of the following looks additive yet
-  breaks downstream, so check it before leaving it under `### Added`:
+### 3. Place breaking changes in their natural section
+librustzcash has **no `### Breaking Changes` section** — Keep a Changelog does not
+define one, and lrz does not add it. A breaking change lives in the section that
+names what happened; the crate's semver **major** bump (chosen by the version-bump
+step, not here) is what records that the release breaks:
+- **Removed**: removing any public item. Under `### Removed`.
+- **Changed**: a changed signature, parameter list, field, or type. Under
+  `### Changed`, as prose stating the new behavior and what callers must do —
+  "`Foo::bar` now takes a `NonZeroU8` instead of a `u8`." (see REFERENCE.md).
+- **Added**: additions stay under `### Added`, even the ones that force a major bump.
+  These look additive but break downstream — leave them under `### Added` (lrz lists
+  new variants there, e.g. `TxVersion::V6`) and let the version bump carry the break:
   - a new variant on an enum that is **not `#[non_exhaustive]`** (exhaustive `match`es
     stop compiling);
-  - a variant changing kind, e.g. unit to struct or tuple, on such an enum (same break);
+  - a variant changing kind, e.g. unit to struct or tuple, on such an enum;
   - a new public field on a struct callers build with a struct literal, when every
-    field is public and the struct is **not `#[non_exhaustive]`** (the literal stops
-    compiling; a derived `Default` does not rescue this if any caller names every
-    field instead of using `..Default::default()`);
-  - a new method on a public trait that downstream code implements (their impls stop
-    compiling); a trait only this crate implements (e.g. a generated server trait) is
-    not breaking.
+    field is public and the struct is **not `#[non_exhaustive]`**;
+  - a new method on a public trait downstream code implements (a trait only this
+    crate implements, e.g. a generated server trait, is not breaking).
 
-Everything else ziff lists is genuinely additive.
+Reserve an inline **BREAKING CHANGES** marker (bold, at the start of the bullet) for
+an exceptionally disruptive change such as a wholesale database-schema migration, as
+lrz uses it rarely. Do not tag every breaking bullet, and never add a `(breaking; …)`
+gloss.
 
 ### 4. Sort into sections
-- **Order**: `### Breaking Changes`, `### Added`, `### Changed`, `### Deprecated`,
+- **Order** (Keep a Changelog): `### Added`, `### Changed`, `### Deprecated`,
   `### Removed`, `### Fixed`, `### Security`. Include only sections with entries.
 - **Source**: ziff fills `Added`/`Changed`/`Removed` from the API and dependency
   diff. `Fixed`, `Deprecated`, and `Security` have no API signal, so take them from
   the PR.
 - **One section per change**: when a change fits several, use the most impactful.
-  Priority: Breaking Changes > Security > Removed > Changed > Deprecated > Added >
-  Fixed.
+  Priority: Security > Removed > Changed > Deprecated > Added > Fixed.
 - **Tone**: plain and factual. No hyperbole ("comprehensive", "significant"),
   marketing ("game-changing"), intensifiers ("greatly improved"), or hedging
   ("helps to", "aims to").

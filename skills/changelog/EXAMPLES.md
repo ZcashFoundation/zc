@@ -18,27 +18,26 @@ made up; only the shape matters.
 
 ## Reasoning
 
-- `network::Peer::Inbound` is a new variant. If `Peer` is not `#[non_exhaustive]`,
-  adding it breaks downstream exhaustive `match`es, so it moves to Breaking Changes
-  (step 3).
-- `config::Limits::max_connections` is a new public field. If `Limits` is
-  constructed with a struct literal and is not `#[non_exhaustive]`, the new field
-  breaks that literal, so it also moves to Breaking Changes (step 3).
-- The `Client::connect` signature change is a `Changed`; render it as prose (step 4
+- `network::Peer::Inbound` is a new enum variant. lrz lists new variants under
+  `### Added` even when they force a major bump (see `TxVersion::V6` in
+  zcash_primitives) — it does not hoist them into a breaking section. It stays under
+  `### Added`; the crate's major version bump records the break.
+- `config::Limits::max_connections` is a new public field. Same rule: it stays under
+  `### Added`.
+- The `Client::connect` signature change is a `Changed`; render it as prose (step 3
   and REFERENCE.md), not as a raw signature dump.
 
 ## Curated `[Unreleased]` entries
 
 ```
-### Breaking Changes
-- `network::Peer` gained an `Inbound` variant, so exhaustive matches need a new arm
-  (breaking; needs a major version bump).
-- `config::Limits` gained a `max_connections` field, so struct literals must set it
-  (breaking; needs a major version bump).
+### Added
+- `config::Limits::max_connections`
+- `network::Peer::Inbound`
 
 ### Changed
 - `Client::connect` now takes an `Opts` argument.
 ```
 
-If `Peer` or `Limits` were `#[non_exhaustive]`, those two would stay under `### Added`
-instead, because downstream code could not break on them.
+Whether `Peer`/`Limits` are `#[non_exhaustive]` does not change placement — both
+entries stay under `### Added`. It changes only whether the release needs a major
+version bump, which the version-bump step decides.
