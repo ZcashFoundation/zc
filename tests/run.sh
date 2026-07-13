@@ -693,6 +693,20 @@ else
 fi
 rm -rf "$repo"
 
+# 11) --version prints the version and commit, and honors ZIFF_NO_UPDATE_CHECK.
+ver=$(grep -m1 '^ZIFF_VERSION=' "$ZIFF" | cut -d= -f2)
+out=$( ZIFF_NO_UPDATE_CHECK=1 "$ZIFF" --version 2>&1 ); rc=$?
+assert_eq "$rc" 0 "--version: exit 0"
+assert_contains "$out" "ziff $ver" "--version: prints 'ziff <ZIFF_VERSION>'"
+assert_contains "$out" "commit:" "--version: prints a commit line"
+case "$out" in
+    *update:*) bad "--version: ZIFF_NO_UPDATE_CHECK should suppress the update line" ;;
+    *) ok "--version: ZIFF_NO_UPDATE_CHECK suppresses the update line" ;;
+esac
+out=$( ZIFF_NO_UPDATE_CHECK=1 "$ZIFF" -V 2>&1 ); rc=$?
+assert_eq "$rc" 0 "-V alias: exit 0"
+assert_contains "$out" "ziff $ver" "-V alias: prints the version line"
+
 echo ""
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]

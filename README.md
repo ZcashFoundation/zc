@@ -86,6 +86,7 @@ ziff --with-lock           # include the transitive Cargo.lock diff
 ziff --with-values main    # also flag const/static value + doc changes
 ziff --json main           # machine-readable output for CI
 ziff --changelog main      # draft a librustzcash-style changelog (markdown)
+ziff --version             # version, current commit, and whether it's up to date with origin/main
 ```
 
 Run `ziff --help` for the full option and output reference.
