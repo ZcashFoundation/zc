@@ -103,7 +103,8 @@
 #                          dep_breaking,             # breaking runtime deps
 #                          error_crates,             # cargo-public-api fails
 #                          value_changed,            # const/static value changes
-#                          doc_changed               # doc-comment changes
+#                          doc_changed,              # doc-comment changes
+#                          public_dep_breaking       # public-dep major bumps
 #                        },
 #                        deps: {
 #                          removed: [ {name, version, kind} ],
@@ -112,6 +113,7 @@
 #                        },
 #                        values: [ {crate, path, type, old, new} ],
 #                        docs:   [ {crate, path} ],
+#                        public_dep_breaks: [ {crate, dep, old, new} ],
 #                        crates: [
 #                          { name, removed, changed, added, status,
 #                            error: null | {
@@ -226,7 +228,7 @@ set -euo pipefail
 # it whenever the dep-dump / metadata logic changes so piped runs don't reuse a
 # stale cache. When run from a real file, the file's content hash is used
 # instead (see SCRIPT_HASH below), so this only matters for piped execution.
-ZC_VERSION=0.1.0
+ZC_VERSION=0.2.0
 
 # ── tunables ──────────────────────────────────────────────────────────
 # Regex (jq-syntax) matching crate names whose deps should be excluded
@@ -1075,7 +1077,7 @@ dump_per_crate_deps() { # $1=ref -> stdout TSV
           [ .packages[]
             | select(.id as $id | $ws_ids | index($id))
             | select(.name | test($test_pat) | not)
-            | { crate: .name, dep: "~msrv", req: (.rust_version // "-"), scope: "msrv" } ]
+            | { crate: .name, dep: "~msrv", req: (.rust_version // "-"), scope: "msrv", pkg: "-" } ]
           +
           [ .packages[]
             | select(.id as $id | $ws_ids | index($id))
@@ -1087,12 +1089,13 @@ dump_per_crate_deps() { # $1=ref -> stdout TSV
             | { crate: $crate,
                 dep: (.rename // .name),
                 req: ((.req // "-") | sub("^\\^"; "")),
-                scope: (if ($ws_names | index($depname)) then "int" else "ext" end) } ]
+                scope: (if ($ws_names | index($depname)) then "int" else "ext" end),
+                pkg: $depname } ]
         )
         | unique_by(.crate + "/" + .dep)
         | sort_by(.crate, .dep)
         | .[]
-        | [ .crate, .dep, .req, .scope ] | @tsv
+        | [ .crate, .dep, .req, .scope, .pkg ] | @tsv
     ' <<<"$meta" >"$cache_tmp" || {
         rm -f "$cache_tmp"
         echo "${YELLOW}warning:${RESET} jq failed processing per-crate deps for '$ref'" >&2
@@ -1595,9 +1598,71 @@ declare -a crate_error_ref_sha=()
 declare -a crate_error_command=()
 declare -a crate_error_stderr=()
 declare -a crate_error_hint=()
+declare -a crate_pubdep_lines=()
 
 changed_crate_count=0
 error_crate_count=0
+
+# ── public-dependency semver join ──────────────────────────────────────
+# cargo-public-api compares signature *text*, so a foreign type re-exposed in a
+# crate's public API (e.g. `-> Result<(), rocksdb::Error>`) looks unchanged even
+# when the foreign crate takes a semver-incompatible bump. We join two signals
+# zc already has: a crate's external direct deps that major-bumped, and the
+# foreign crate roots reachable in that crate's public API. Direct deps only for
+# now; internal workspace bumps are already covered by the per-crate API diff.
+declare -A pubdep_req_base=() pubdep_req_head=() pubdep_crate_ext=() pubdep_pkg=()
+
+# Populate the lookup tables from `dump_per_crate_deps` TSV at both refs. `dep`
+# is the Cargo rename (the name used in code), `pkg` the real package name —
+# rustdoc renders foreign paths by the package name, so the join needs both.
+build_pubdep_tables() { # $1=base TSV  $2=head TSV
+    local cr dp rq sc pkg
+    while IFS=$'\t' read -r cr dp rq sc pkg; do
+        { [ -z "$cr" ] || [ "$sc" = msrv ]; } && continue
+        pubdep_req_base["$cr|$dp"]=$rq
+    done <<<"$1"
+    while IFS=$'\t' read -r cr dp rq sc pkg; do
+        { [ -z "$cr" ] || [ "$sc" = msrv ]; } && continue
+        pubdep_req_head["$cr|$dp"]=$rq
+        pubdep_pkg["$cr|$dp"]=$pkg
+        [ "$sc" = ext ] && pubdep_crate_ext["$cr"]+="$dp"$'\n'
+    done <<<"$2"
+}
+
+# Emit findings for crate $1 (head rustdoc JSON $2): one "dep<TAB>old<TAB>new"
+# line per external direct dep that both major-bumped and is reachable in the
+# crate's public API. Result in PUBDEP_RESULT (empty when none).
+compute_pubdep_breaks() { # $1=crate
+    local crate=$1 dep bq hq root api_text buf=""
+    PUBDEP_RESULT=""
+    local ext=${pubdep_crate_ext[$crate]:-}
+    [ -n "$ext" ] || return 0
+    local -a majors=()
+    while IFS= read -r dep; do
+        [ -z "$dep" ] && continue
+        bq=${pubdep_req_base["$crate|$dep"]:-}
+        hq=${pubdep_req_head["$crate|$dep"]:-}
+        { [ -z "$bq" ] || [ -z "$hq" ] || [ "$bq" = "$hq" ]; } && continue
+        [ "$(classify_bump "$bq" "$hq")" = major ] && majors+=("$dep")
+    done <<<"$ext"
+    [ ${#majors[@]} -gt 0 ] || return 0
+    # Full public API surface at head (the diff is empty in exactly the case we
+    # care about, so we need the whole surface, not the diff). List mode builds
+    # from the head worktree, reusing the already-populated target dir so this is
+    # a rustdoc-only pass, and only runs for crates with a major external bump.
+    api_text=$(CARGO_TARGET_DIR="$api_head_target" cargo public-api "${feature_args[@]}" \
+        --manifest-path "$api_head_worktree/Cargo.toml" -p "$crate" -ss 2>/dev/null || true)
+    [ -n "$api_text" ] || return 0
+    for dep in "${majors[@]}"; do
+        local pkg=${pubdep_pkg["$crate|$dep"]:-$dep}
+        root=${dep//-/_}
+        local root_pkg=${pkg//-/_}
+        if printf '%s\n' "$api_text" | grep -qE "(^|[^A-Za-z0-9_])(${root}|${root_pkg})::"; then
+            buf+="${dep}"$'\t'"${pubdep_req_base["$crate|$dep"]}"$'\t'"${pubdep_req_head["$crate|$dep"]}"$'\n'
+        fi
+    done
+    PUBDEP_RESULT=$buf
+}
 
 public_api_error_tail() {
     local file=$1 text
@@ -1752,6 +1817,13 @@ done
 # runs; the section is emitted in one go after the loop completes.
 api_rows=""
 
+# Per-crate direct deps at both refs feed the public-dependency semver join.
+# Cached, so --changelog's later read is a hit; failure degrades to an empty
+# join rather than aborting a non-changelog run.
+build_pubdep_tables \
+    "$(dump_per_crate_deps "$baseline_sha" 2>/dev/null || true)" \
+    "$(dump_per_crate_deps "$head_sha" 2>/dev/null || true)"
+
 progress_start
 for i in "${!all_crates[@]}"; do
     crate_name="${all_crates[$i]}"
@@ -1803,6 +1875,7 @@ for i in "${!all_crates[@]}"; do
         crate_error_command+=("$PUBLIC_API_ERROR_COMMAND")
         crate_error_stderr+=("$PUBLIC_API_ERROR_STDERR")
         crate_error_hint+=("$PUBLIC_API_ERROR_HINT")
+        crate_pubdep_lines+=("")
         first_line=$(printf '%s\n' "$PUBLIC_API_ERROR_STDERR" | sed -n '1p')
         api_rows+=$(printf "  %-${crate_col_width}s ${RED}error${RESET}: %s${DIM} (%s)${RESET}" \
             "$crate_name" "$PUBLIC_API_ERROR_STAGE" "${first_line:-cargo public-api failed}")$'\n'
@@ -1864,6 +1937,9 @@ for i in "${!all_crates[@]}"; do
     crate_error_command+=("")
     crate_error_stderr+=("")
     crate_error_hint+=("")
+
+    compute_pubdep_breaks "$crate_name"
+    crate_pubdep_lines+=("$PUBDEP_RESULT")
 
     removed_total=$((removed_total + r))
     changed_total=$((changed_total + c))
@@ -2017,6 +2093,13 @@ if $with_values; then
     fi
 fi
 
+# Total public-dependency semver breaks across all crates.
+pubdep_break_total=0
+for pd in "${crate_pubdep_lines[@]:-}"; do
+    [ -n "$pd" ] || continue
+    pubdep_break_total=$((pubdep_break_total + $(printf '%s' "$pd" | grep -c . || true)))
+done
+
 # ── summary ───────────────────────────────────────────────────────────
 
 echo ""
@@ -2024,7 +2107,7 @@ echo "${BOLD}Summary${RESET}  ${DIM}(${changed_crate_count}/${crate_count} crate
 
 # Only show the table if there are changes; otherwise a one-liner suffices.
 # In JSON mode we always fall through so the JSON block below emits.
-if [ $((removed_total + changed_total + added_total + value_changed_total + doc_changed_total)) -eq 0 ] && [ "$error_crate_count" -eq 0 ]; then
+if [ $((removed_total + changed_total + added_total + value_changed_total + doc_changed_total)) -eq 0 ] && [ "$error_crate_count" -eq 0 ] && [ "$pubdep_break_total" -eq 0 ]; then
     echo ""
     echo "  ${GREEN}No public API changes.${RESET}"
     # In changelog mode, fall through even with no API changes: a crate may still
@@ -2686,6 +2769,18 @@ if $changelog_mode; then
         ' <(printf '%s\n' "$pc_base") <(printf '%s\n' "$pc_head"))
     fi
 
+    # Public-dependency semver breaks per crate: a `### Changed` prose note so the
+    # curator bumps the crate to a major version. Without it the draft shows
+    # nothing for a crate whose only break is a re-exposed major-bumped dep.
+    declare -A pubdep_md=()
+    for i in "${!crate_names[@]}"; do
+        [ -n "${crate_pubdep_lines[$i]}" ] || continue
+        while IFS=$'\t' read -r dep old new; do
+            [ -z "$dep" ] && continue
+            pubdep_md["${crate_names[$i]}"]+="- Public dependency \`${dep}\` upgraded to \`${new}\` (major); it appears in this crate's public API, so this is a breaking change."$'\n'
+        done <<<"${crate_pubdep_lines[$i]}"
+    done
+
     # Per-crate rustdoc trait map (at head), so trait-impl associated items group
     # under `impl Trait for Self` instead of their bare Self type. Built only for
     # crates that have API changes; degrades silently to plain grouping without a
@@ -2725,6 +2820,7 @@ if $changelog_mode; then
             name="${crate_names[$i]}"
             r="${crate_removed[$i]}" c="${crate_changed[$i]}" a="${crate_added[$i]}"
             dc="${dep_changed_md[$name]:-}" dr="${dep_removed_md[$name]:-}"
+            pm="${pubdep_md[$name]:-}"
             tf="${trait_file[$name]:-}" tfb="${trait_file_base[$name]:-}"
             pfx="${name//-/_}"
             # Render first, then emit only the sections that have content — items
@@ -2733,7 +2829,7 @@ if $changelog_mode; then
             [ "$a" -gt 0 ] && added_md=$(render_changelog "${crate_added_lines[$i]}" added "$pfx" "$tf")
             [ "$c" -gt 0 ] && changed_md=$(render_changelog "${crate_changed_lines[$i]}" changed "$pfx" "$tf")
             [ "$r" -gt 0 ] && removed_md=$(render_changelog "${crate_removed_lines[$i]}" removed "$pfx" "$tfb")
-            [ -z "$added_md$changed_md$removed_md$dc$dr" ] && continue
+            [ -z "$added_md$changed_md$removed_md$dc$dr$pm" ] && continue
             echo "## ${name}"
             echo ""
             if [ -n "$added_md" ]; then
@@ -2741,9 +2837,10 @@ if $changelog_mode; then
                 printf '%s\n' "$added_md"
                 echo ""
             fi
-            if [ -n "$changed_md" ] || [ -n "$dc" ]; then
+            if [ -n "$changed_md" ] || [ -n "$dc" ] || [ -n "$pm" ]; then
                 echo "### Changed"
                 [ -n "$dc" ] && printf '%s' "$dc"
+                [ -n "$pm" ] && printf '%s' "$pm"
                 [ -n "$changed_md" ] && printf '%s\n' "$changed_md"
                 echo ""
             fi
@@ -2823,6 +2920,19 @@ if [ "$doc_changed_total" -gt 0 ]; then
         echo "    ${YELLOW}~ ${path}${RESET}${DIM} (doc text changed)${RESET}"
     done
 fi
+if [ "$pubdep_break_total" -gt 0 ]; then
+    echo ""
+    echo "${BOLD}Public-dependency breaks (${pubdep_break_total})${RESET}${DIM} — public API exposes a major-bumped dependency; cargo-public-api can't see these${RESET}"
+    for i in "${!crate_names[@]}"; do
+        [ -n "${crate_pubdep_lines[$i]}" ] || continue
+        echo ""
+        echo "  ${BOLD}${crate_names[$i]}${RESET}"
+        while IFS=$'\t' read -r dep old new; do
+            [ -z "$dep" ] && continue
+            echo "    ${RED}${dep}${RESET}${DIM}: ${RESET}${RED}${old}${RESET} ${DIM}->${RESET} ${GREEN}${new}${RESET}${DIM} (major; reachable in public API)${RESET}"
+        done <<<"${crate_pubdep_lines[$i]}"
+    done
+fi
 fi
 
 # ── verdict ───────────────────────────────────────────────────────────
@@ -2833,6 +2943,7 @@ any_breaking=false
 $has_breaking && any_breaking=true
 [ "$dep_breaking_count" -gt 0 ] && any_breaking=true
 [ "$value_changed_total" -gt 0 ] && any_breaking=true
+[ "$pubdep_break_total" -gt 0 ] && any_breaking=true
 
 # ── JSON output (opt-in) ──────────────────────────────────────────────
 # When --json is set we assemble a structured document from the same
@@ -2884,6 +2995,18 @@ if $json_mode; then
         split("\n") | map(select(length > 0) | split("\t")
             | {crate: .[0], path: .[1]})')
 
+    pubdep_rows=""
+    for i in "${!crate_names[@]}"; do
+        [ -n "${crate_pubdep_lines[$i]}" ] || continue
+        while IFS=$'\t' read -r dep old new; do
+            [ -z "$dep" ] && continue
+            pubdep_rows+="${crate_names[$i]}"$'\t'"${dep}"$'\t'"${old}"$'\t'"${new}"$'\n'
+        done <<<"${crate_pubdep_lines[$i]}"
+    done
+    pubdep_json=$(printf '%s' "$pubdep_rows" | jq -R -s '
+        split("\n") | map(select(length > 0) | split("\t")
+            | {crate: .[0], dep: .[1], old: .[2], new: .[3]})')
+
     jq -n \
         --arg baseline "$baseline_label" \
         --arg baseline_sha "$baseline_short" \
@@ -2903,6 +3026,8 @@ if $json_mode; then
         --argjson deps_added "$dep_add_json" \
         --argjson values "$val_json" \
         --argjson docs "$doc_json" \
+        --argjson public_dep_breaks "$pubdep_json" \
+        --argjson pubdep_break "$pubdep_break_total" \
         "${crate_jsons[@]}" \
         "($crate_expr) as \$crates |
         {
@@ -2919,7 +3044,8 @@ if $json_mode; then
                 dep_breaking: \$dep_breaking,
                 error_crates: \$error_crates,
                 value_changed: \$value_changed,
-                doc_changed: \$doc_changed
+                doc_changed: \$doc_changed,
+                public_dep_breaking: \$pubdep_break
             },
             deps: {
                 removed: \$deps_removed,
@@ -2928,6 +3054,7 @@ if $json_mode; then
             },
             values: \$values,
             docs: \$docs,
+            public_dep_breaks: \$public_dep_breaks,
             crates: \$crates
         }" >&3
 
@@ -2953,6 +3080,9 @@ if $any_breaking; then
     fi
     if [ "$value_changed_total" -gt 0 ]; then
         parts+=("values: $value_changed_total changed")
+    fi
+    if [ "$pubdep_break_total" -gt 0 ]; then
+        parts+=("public-dep: $pubdep_break_total breaking")
     fi
     joined=""
     sep=""

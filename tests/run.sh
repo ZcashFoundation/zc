@@ -707,6 +707,83 @@ out=$( ZC_NO_UPDATE_CHECK=1 "$ZC" -V 2>&1 ); rc=$?
 assert_eq "$rc" 0 "-V alias: exit 0"
 assert_contains "$out" "zc $ver" "-V alias: prints the version line"
 
+# 12) Public-dependency semver join: a foreign type re-exposed in a crate's
+#     public API whose crate takes a major bump is flagged, attributed to that
+#     crate, even though cargo-public-api sees identical signature text.
+#
+# Workspace crate `foo` depends on an out-of-workspace path crate `bar` (the
+# "external" dep, v0.1.0 exposing `pub struct Error;`). The head bumps bar to
+# 0.2.0 (a 0.x major) with no change to foo's source.
+new_pubdep_repo() { # $1=foo dependency line  $2=foo/src/lib.rs  -> repo dir
+    local dep_line=$1 lib=$2 d
+    d=$(mktemp -d)
+    git -C "$d" init -q
+    git -C "$d" config user.email t@t
+    git -C "$d" config user.name t
+    git -C "$d" config commit.gpgsign false
+    printf '/target\n' >"$d/.gitignore"
+    printf '[workspace]\nmembers = ["foo"]\nexclude = ["bar"]\nresolver = "2"\n' >"$d/Cargo.toml"
+    mkdir -p "$d/foo/src" "$d/bar/src"
+    printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n%s\n' "$dep_line" >"$d/foo/Cargo.toml"
+    printf '%s\n' "$lib" >"$d/foo/src/lib.rs"
+    printf '[package]\nname = "bar"\nversion = "0.1.0"\nedition = "2021"\n' >"$d/bar/Cargo.toml"
+    printf 'pub struct Error;\n' >"$d/bar/src/lib.rs"
+    ( cd "$d" && cargo generate-lockfile -q ) >/dev/null 2>&1
+    git -C "$d" add -A
+    git -C "$d" commit -qm base
+    printf '%s' "$d"
+}
+bump_pubdep_head() { # $1=repo  $2=new foo dependency line  -> head sha
+    local d=$1 dep_line=$2
+    sed -i 's/^version = "0.1.0"/version = "0.2.0"/' "$d/bar/Cargo.toml"
+    printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n%s\n' "$dep_line" >"$d/foo/Cargo.toml"
+    ( cd "$d" && cargo generate-lockfile -q ) >/dev/null 2>&1
+    git -C "$d" add -A
+    git -C "$d" commit -qm head
+    git -C "$d" rev-parse HEAD
+}
+
+# 12a) Positive: foreign type in the public API -> flagged and attributed.
+repo=$(new_pubdep_repo 'bar = { path = "../bar", version = "0.1" }' 'pub fn f() -> Result<(), bar::Error> { Ok(()) }')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(bump_pubdep_head "$repo" 'bar = { path = "../bar", version = "0.2" }')
+json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null ); rc=$?
+assert_eq "$rc" 1 "public-dep: exposed major bump exits 1"
+if printf '%s' "$json" | jq -e '.totals.public_dep_breaking >= 1 and (.public_dep_breaks | any(.crate == "foo" and .dep == "bar" and .new == "0.2"))' >/dev/null 2>&1; then
+    ok "public-dep: exposed major bump attributed to foo/bar"
+else
+    bad "public-dep: expected foo/bar public_dep_break, got: $(printf '%s' "$json" | jq -c '.public_dep_breaks' 2>/dev/null)"
+fi
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+assert_contains "$out" "## foo" "public-dep --changelog: foo section present"
+assert_contains "$out" 'Public dependency `bar`' "public-dep --changelog: names the breaking dep"
+rm -rf "$repo"
+
+# 12b) Negative: same bump, but the foreign type is used only in a private fn.
+repo=$(new_pubdep_repo 'bar = { path = "../bar", version = "0.1" }' $'fn helper() -> Result<(), bar::Error> { Ok(()) }\npub fn f() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(bump_pubdep_head "$repo" 'bar = { path = "../bar", version = "0.2" }')
+json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null )
+if printf '%s' "$json" | jq -e '.totals.public_dep_breaking == 0 and (.public_dep_breaks | length == 0)' >/dev/null 2>&1; then
+    ok "public-dep: private-only use is not flagged"
+else
+    bad "public-dep: private use should not flag, got: $(printf '%s' "$json" | jq -c '.public_dep_breaks' 2>/dev/null)"
+fi
+rm -rf "$repo"
+
+# 12c) Rename: `baz = { package = "bar" }` used publicly -> the join still fires
+#      (guards the dep-name <-> path-root mapping via cargo's rename).
+repo=$(new_pubdep_repo 'baz = { package = "bar", path = "../bar", version = "0.1" }' 'pub fn f() -> Result<(), baz::Error> { Ok(()) }')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(bump_pubdep_head "$repo" 'baz = { package = "bar", path = "../bar", version = "0.2" }')
+json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null )
+if printf '%s' "$json" | jq -e '.public_dep_breaks | any(.crate == "foo" and .dep == "baz")' >/dev/null 2>&1; then
+    ok "public-dep: renamed dep (package = bar, used as baz) still joins"
+else
+    bad "public-dep: renamed dep should join, got: $(printf '%s' "$json" | jq -c '.public_dep_breaks' 2>/dev/null)"
+fi
+rm -rf "$repo"
+
 echo ""
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]

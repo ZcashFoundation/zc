@@ -22,6 +22,11 @@ a single command tells you whether a branch breaks your published surface.
    crate result.
 4. **Const/static value & doc-comment diff** (`--with-values`) — catches changes
    `cargo public-api` can't see, since it compares signatures only.
+5. **Public-dependency semver breaks** — when a crate re-exposes a foreign type
+   (e.g. `-> Result<(), rocksdb::Error>`) whose crate takes a major bump, the
+   signature text is unchanged, so `cargo public-api` sees no diff. zc joins the
+   crate's external direct-dep major bumps with the foreign roots in its public
+   API to flag the break and attribute it to that crate.
 
 It ends with a `BREAKING` / `ERROR` / `OK` verdict. `--json` emits machine-readable output for CI and agents.
 
@@ -99,8 +104,10 @@ stderr.
 Top-level fields:
 
 - `verdict`: `ok`, `breaking`, or `error`
-- `totals`: API, dependency, value, doc, and error counts
+- `totals`: API, dependency, value, doc, public-dep, and error counts
 - `deps`, `values`, `docs`: structured diff details
+- `public_dep_breaks`: `[{crate, dep, old, new}]` — crates whose public API
+  re-exposes a major-bumped external dependency
 - `crates`: one entry per workspace crate, sorted by crate name
 
 A crate error has this shape:
