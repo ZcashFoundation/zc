@@ -1,9 +1,9 @@
-# Changelog example: ziff draft to curated entries
+# Changelog example: zc draft to curated entries
 
 One illustrative pass through [SKILL.md](SKILL.md) for a single crate. The names are
 made up; only the shape matters.
 
-## ziff --changelog output (the draft)
+## zc --changelog output (the draft)
 
 ```
 ## example-crate

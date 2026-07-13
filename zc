@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ziff — Detect public API and dependency changes across all
+# zc — Detect public API and dependency changes across all
 # workspace crates.
 #
 # Compares every workspace crate between two git refs (baseline and head,
@@ -31,7 +31,7 @@
 #   a nightly toolchain (builds rustdoc JSON)
 #
 # USAGE
-#   ziff [options] [<baseline> [<head>]]
+#   zc [options] [<baseline> [<head>]]
 #
 # ARGUMENTS
 #   <baseline>    Git ref to compare against: branch name, tag, or commit SHA.
@@ -61,7 +61,7 @@
 #   -h, --help       Print this help message and exit.
 #   -V, --version    Print the version, the commit this script sits at, and a
 #                    best-effort check of whether it is current with origin/main,
-#                    then exit. Set ZIFF_NO_UPDATE_CHECK to skip the remote check.
+#                    then exit. Set ZC_NO_UPDATE_CHECK to skip the remote check.
 #   --with-lock      Also diff Cargo.lock for transitive dep changes.
 #   --by-type        By default, per-crate API items are grouped into a
 #                    module > type > member hierarchy: a module header, then a
@@ -121,19 +121,19 @@
 #                        ]
 #                      }
 #                    Error `stage` is baseline_build, head_build, or diff.
-#                    ziff keeps --all-features and does not automatically fall
+#                    zc keeps --all-features and does not automatically fall
 #                    back to default features because that can hide public API.
 #
 # EXAMPLES
-#   ziff                     # if dirty: HEAD -> working tree
+#   zc                     # if dirty: HEAD -> working tree
 #                                    # if clean: branch point with parent -> HEAD
-#   ziff main                # diff against the branch point with main
+#   zc main                # diff against the branch point with main
 #                                    # (HEAD, or working tree if dirty)
-#   ziff v4.2.0              # diff against v4.2.0 (a tag/ancestor: exact)
-#   ziff v4.1.0 v4.2.0       # compare two arbitrary refs (exact, no merge-base)
-#   ziff --with-lock         # include transitive Cargo.lock diff
-#   ziff --with-values main  # also flag const/static value + doc changes
-#   ziff --json main         # machine-readable output for CI
+#   zc v4.2.0              # diff against v4.2.0 (a tag/ancestor: exact)
+#   zc v4.1.0 v4.2.0       # compare two arbitrary refs (exact, no merge-base)
+#   zc --with-lock         # include transitive Cargo.lock diff
+#   zc --with-values main  # also flag const/static value + doc changes
+#   zc --json main         # machine-readable output for CI
 #
 # OUTPUT
 #   Sections are printed in order:
@@ -164,13 +164,13 @@
 #   With --json a single JSON document is printed instead (schema above).
 #
 # ENVIRONMENT
-#   CARGO_TARGET_DIR   Used as the root for ziff's cache. When unset,
-#                      `target/ziff-cache/` is used. Dependency and derived
+#   CARGO_TARGET_DIR   Used as the root for zc's cache. When unset,
+#                      `target/zc-cache/` is used. Dependency and derived
 #                      TSV caches are keyed on the resolved ref SHA plus a hash
 #                      of this script. Rustdoc JSON is keyed on ref SHA, crate,
 #                      cargo-public-api version, nightly rustc version, and
 #                      feature policy.
-#   ZIFF_TOOLCHAIN     Nightly toolchain name used to build rustdoc JSON.
+#   ZC_TOOLCHAIN     Nightly toolchain name used to build rustdoc JSON.
 #                      Defaults to the first installed `nightly*` toolchain.
 #   NO_COLOR           When set to any non-empty value, disables ANSI
 #                      color output (https://no-color.org).
@@ -178,7 +178,7 @@
 # EXIT CODES
 #   0   Clean. No breaking API, dependency, or value changes were found.
 #   1   Breaking changes were detected.
-#   2   Analysis error. ziff could not produce a trustworthy verdict because
+#   2   Analysis error. zc could not produce a trustworthy verdict because
 #       cargo-public-api, rustdoc, metadata, or another analysis step failed.
 #   64  Usage or setup error, such as an unknown option, bad ref, missing
 #       required tool, or unsupported shell.
@@ -189,29 +189,29 @@ EXIT_ANALYSIS=2
 EXIT_USAGE=64
 
 if [ -z "${BASH_VERSION:-}" ]; then
-    echo "error: ziff must be run with bash 4+" >&2
+    echo "error: zc must be run with bash 4+" >&2
     echo "  macOS users can install it with: brew install bash" >&2
     exit "$EXIT_USAGE"
 fi
 
-ziff_reexec_with_newer_bash() {
-    [ -z "${ZIFF_BASH_REEXEC:-}" ] || return 1
+zc_reexec_with_newer_bash() {
+    [ -z "${ZC_BASH_REEXEC:-}" ] || return 1
     [ -f "$0" ] && [ -r "$0" ] || return 1
     local candidate path major
-    for candidate in "${ZIFF_BASH:-}" bash /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    for candidate in "${ZC_BASH:-}" bash /opt/homebrew/bin/bash /usr/local/bin/bash; do
         [ -n "$candidate" ] || continue
         path=$(command -v "$candidate" 2>/dev/null || true)
         [ -n "$path" ] || continue
         major=$("$path" -c 'printf "%s\n" "${BASH_VERSINFO[0]}"' 2>/dev/null || printf '0\n')
         case "$major" in
-        [4-9] | [1-9][0-9]*) exec env ZIFF_BASH_REEXEC=1 "$path" "$0" "$@" ;;
+        [4-9] | [1-9][0-9]*) exec env ZC_BASH_REEXEC=1 "$path" "$0" "$@" ;;
         esac
     done
     return 1
 }
 
 if (( BASH_VERSINFO[0] < 4 )); then
-    ziff_reexec_with_newer_bash "$@" || {
+    zc_reexec_with_newer_bash "$@" || {
         echo "error: bash 4+ required (associative arrays)" >&2
         echo "  macOS ships bash 3.2. Install a newer bash with: brew install bash" >&2
         echo "  Then run: /opt/homebrew/bin/bash $0 $*" >&2
@@ -226,7 +226,7 @@ set -euo pipefail
 # it whenever the dep-dump / metadata logic changes so piped runs don't reuse a
 # stale cache. When run from a real file, the file's content hash is used
 # instead (see SCRIPT_HASH below), so this only matters for piped execution.
-ZIFF_VERSION=0.1.0
+ZC_VERSION=0.1.0
 
 # ── tunables ──────────────────────────────────────────────────────────
 # Regex (jq-syntax) matching crate names whose deps should be excluded
@@ -279,7 +279,7 @@ progress() {
     if [ -n "$progress_state_file" ]; then
         printf '%s' "$1" >"$progress_state_file"
     elif [ ! -t 2 ]; then
-        printf 'ziff: %s\n' "$1" >&2
+        printf 'zc: %s\n' "$1" >&2
     fi
 }
 
@@ -306,15 +306,15 @@ show_help() {
         return
     fi
     cat <<'EOF'
-ziff — diff the public API and dependencies of a Rust workspace between two git refs.
+zc — diff the public API and dependencies of a Rust workspace between two git refs.
 
-Usage: ziff [options] [<baseline> [<head>]]
+Usage: zc [options] [<baseline> [<head>]]
 
 Options: --with-lock  --with-values  --by-type  --flat  --changelog  --json  -V/--version  -h/--help
 
 Piped execution shows only this short help. For the full reference, grab a copy:
-  curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff -o ziff
-  chmod +x ziff && ./ziff --help
+  curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/main/zc -o zc
+  chmod +x zc && ./zc --help
 EOF
 }
 
@@ -335,16 +335,16 @@ run_with_timeout() { # $1=seconds  $2..=command
 # Best-effort freshness check against the checkout's `origin` (or the canonical
 # repo when run standalone). Reads the remote's `main` head without fetching,
 # never blocks more than a few seconds, and degrades to a diagnostic line when
-# offline. Skipped entirely when ZIFF_NO_UPDATE_CHECK is set.
+# offline. Skipped entirely when ZC_NO_UPDATE_CHECK is set.
 version_update_check() { # $1=repo dir ("" when not a checkout)
-    [ -n "${ZIFF_NO_UPDATE_CHECK:-}" ] && return 0
+    [ -n "${ZC_NO_UPDATE_CHECK:-}" ] && return 0
     local dir=$1 in_tree=false url remote short
     [ -n "$dir" ] && git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 && in_tree=true
 
     if $in_tree; then
         url=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
     fi
-    [ -n "${url:-}" ] || url="https://github.com/ZcashFoundation/ziff.git"
+    [ -n "${url:-}" ] || url="https://github.com/ZcashFoundation/zc.git"
 
     remote=$(run_with_timeout 8 \
         git -c core.sshCommand='ssh -o ConnectTimeout=5 -o BatchMode=yes' \
@@ -374,7 +374,7 @@ version_update_check() { # $1=repo dir ("" when not a checkout)
 # run from a git checkout), and the update check above. Runs before any tool
 # prereq check, so it works without cargo-public-api / nightly / jq installed.
 show_version() {
-    printf 'ziff %s\n' "$ZIFF_VERSION"
+    printf 'zc %s\n' "$ZC_VERSION"
 
     local path dir="" commit cdate dirty=""
     path=$0
@@ -578,7 +578,7 @@ worktree_snapshot_commit() {
         return 1
     }
     commit=$(git commit-tree "$tree" -p "$head_sha" \
-        -m "[ziff worktree snapshot]" 2>/dev/null) || {
+        -m "[zc worktree snapshot]" 2>/dev/null) || {
         echo "${RED}error:${RESET} git commit-tree failed" >&2
         return 1
     }
@@ -671,12 +671,12 @@ if ! cargo public-api --version >/dev/null 2>&1; then
     exit "$EXIT_USAGE"
 fi
 
-nightly_toolchain="${ZIFF_TOOLCHAIN:-}"
+nightly_toolchain="${ZC_TOOLCHAIN:-}"
 if [ -z "$nightly_toolchain" ]; then
     nightly_toolchain=$(rustup toolchain list 2>/dev/null | grep -oE 'nightly[^ ]*' | head -n1 || true)
 fi
 if [ -z "$nightly_toolchain" ]; then
-    echo "${RED}error:${RESET} ziff needs a nightly toolchain to build rustdoc JSON" >&2
+    echo "${RED}error:${RESET} zc needs a nightly toolchain to build rustdoc JSON" >&2
     echo "  install one with: rustup toolchain install nightly" >&2
     exit "$EXIT_USAGE"
 fi
@@ -755,15 +755,15 @@ workspace_crate_names() { # $1=workspace dir, defaults to PWD
 # plus a hash of this script, so edits to the jq query invalidate the cache.
 # When $0 isn't a readable file (piped via `curl … | bash`), it can't be
 # hashed, so fall back to the version string as the cache key.
-CACHE_DIR="${CARGO_TARGET_DIR:-target}/ziff-cache"
+CACHE_DIR="${CARGO_TARGET_DIR:-target}/zc-cache"
 if [ -f "$0" ] && [ -r "$0" ]; then
     SCRIPT_HASH=$(sha1_short "$0")
 else
-    SCRIPT_HASH="v${ZIFF_VERSION}"
+    SCRIPT_HASH="v${ZC_VERSION}"
 fi
 mkdir -p "$CACHE_DIR" 2>/dev/null || true
 CACHE_DIR=$(cd "$CACHE_DIR" 2>/dev/null && pwd -P) || {
-    echo "${RED}error:${RESET} failed to resolve ziff cache directory" >&2
+    echo "${RED}error:${RESET} failed to resolve zc cache directory" >&2
     exit "$EXIT_USAGE"
 }
 
@@ -776,7 +776,7 @@ rustc_version=$(rustc +"$nightly_toolchain" --version 2>/dev/null) || {
     exit "$EXIT_USAGE"
 }
 api_fp_input=$(mktemp -p "$CACHE_DIR" api-fingerprint.XXXXXX) || {
-    echo "${RED}error:${RESET} failed to create ziff cache fingerprint input" >&2
+    echo "${RED}error:${RESET} failed to create zc cache fingerprint input" >&2
     exit "$EXIT_USAGE"
 }
 {
@@ -1612,16 +1612,16 @@ public_api_hint() {
     local text=${1,,}
     case "$text" in
     *protoc* | *protobuf-compiler*)
-        echo "Install protoc, for example brew install protobuf or apt-get install protobuf-compiler, then rerun ziff."
+        echo "Install protoc, for example brew install protobuf or apt-get install protobuf-compiler, then rerun zc."
         ;;
     *"custom build command"*)
         echo "A build script failed. Run the command shown above to inspect the crate's build requirements."
         ;;
     *"cargo.lock"* | *"lock file"* | *"lockfile"*)
-        echo "The lockfile or dependency resolution failed at this ref. Check Cargo.lock and rerun ziff."
+        echo "The lockfile or dependency resolution failed at this ref. Check Cargo.lock and rerun zc."
         ;;
     *"requires rustc"* | *"rustc "*"is not supported"*)
-        echo "The selected Rust toolchain cannot build this ref. Install the required toolchain and rerun ziff."
+        echo "The selected Rust toolchain cannot build this ref. Install the required toolchain and rerun zc."
         ;;
     *"no library targets"* | *"does not have a library target"*)
         echo "cargo-public-api can only analyze library targets. Exclude this crate or add a library target."
@@ -1906,7 +1906,7 @@ declare -a doc_changes=()
 if $with_values; then
     # Split the lookup off the `:-` default so a no-match `grep` (exit 1 under
     # pipefail) can't abort the script via `set -e` before the skip-guard below.
-    nightly_toolchain="${ZIFF_TOOLCHAIN:-}"
+    nightly_toolchain="${ZC_TOOLCHAIN:-}"
     if [ -z "$nightly_toolchain" ]; then
         nightly_toolchain=$(rustup toolchain list 2>/dev/null | grep -oE 'nightly[^ ]*' | head -n1 || true)
     fi

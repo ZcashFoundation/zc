@@ -16,10 +16,10 @@ jobs:
       - uses: actions/checkout@v4
       # shellcheck is preinstalled on ubuntu-latest runners.
       - name: shellcheck
-        run: shellcheck -S warning ziff tests/run.sh
+        run: shellcheck -S warning zc tests/run.sh
       - name: bash syntax
         run: |
-          bash -n ziff
+          bash -n zc
           bash -n tests/run.sh
 
   test:

@@ -1,10 +1,10 @@
-# ziff
+# zc
 
 Diff the **public API** and **dependencies** of a Rust workspace's crates
 between two git refs — and flag the changes that are breaking for downstream
 consumers.
 
-`ziff` wraps [`cargo public-api`](https://github.com/cargo-public-api/cargo-public-api)
+`zc` wraps [`cargo public-api`](https://github.com/cargo-public-api/cargo-public-api)
 and adds workspace-wide dependency, lockfile, and const/value diffing on top, so
 a single command tells you whether a branch breaks your published surface.
 
@@ -17,7 +17,7 @@ a single command tells you whether a branch breaks your published surface.
    each annotated with the direct deps that pull it in.
 3. **Per-crate public-API diff** (`cargo public-api`) — removed / changed / added
    items per workspace crate. Built with `--all-features` so feature-gated public
-   items are never silently missed. If a crate cannot be analyzed, ziff reports
+   items are never silently missed. If a crate cannot be analyzed, zc reports
    the failing stage, stderr tail, command, and hint instead of returning an empty
    crate result.
 4. **Const/static value & doc-comment diff** (`--with-values`) — catches changes
@@ -25,23 +25,23 @@ a single command tells you whether a branch breaks your published surface.
 
 It ends with a `BREAKING` / `ERROR` / `OK` verdict. `--json` emits machine-readable output for CI and agents.
 
-`ziff` materializes the baseline and head refs in disposable detached worktrees
+`zc` materializes the baseline and head refs in disposable detached worktrees
 under a per-run temp directory. Public API builds use target dirs in that temp
 directory, so the invoking checkout's HEAD, branch, index, working tree, and
 `Cargo.lock` are not checked out over or built in. The worktrees are removed on exit.
 
 ## Cache
 
-ziff stores persistent cache files under `target/ziff-cache/`, or under
-`$CARGO_TARGET_DIR/ziff-cache/` when `CARGO_TARGET_DIR` is set. The cache includes
+zc stores persistent cache files under `target/zc-cache/`, or under
+`$CARGO_TARGET_DIR/zc-cache/` when `CARGO_TARGET_DIR` is set. The cache includes
 resolved dependency summaries, derived value/doc and trait-map indexes, and
 per-ref per-crate rustdoc JSON for public API analysis.
 
 Rustdoc JSON cache entries are keyed by commit SHA, crate name,
 `cargo-public-api` version, nightly `rustc` version, and the feature policy used
 for the run. Working-tree snapshots are not written to the rustdoc JSON cache.
-ziff removes `*.api.json` files older than 14 days at startup. Delete
-`target/ziff-cache/` with `rm -rf target/ziff-cache` to clear all ziff cache
+zc removes `*.api.json` files older than 14 days at startup. Delete
+`target/zc-cache/` with `rm -rf target/zc-cache` to clear all zc cache
 state for a checkout.
 
 ## Install
@@ -52,24 +52,24 @@ First install the prerequisites (see [Requirements](#requirements)):
 cargo install cargo-public-api    # required; jq is also required
 ```
 
-Then get `ziff` itself — it's a single Bash script. Install it onto your `PATH`:
+Then get `zc` itself — it's a single Bash script. Install it onto your `PATH`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff -o ~/.local/bin/ziff && chmod +x ~/.local/bin/ziff
+curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/main/zc -o ~/.local/bin/zc && chmod +x ~/.local/bin/zc
 ```
 
 …or run a one-off without installing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff | bash -s -- main
+curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/main/zc | bash -s -- main
 ```
 
 In CI, the download-then-run form is the most robust:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/ziff/main/ziff -o ziff
-chmod +x ziff
-./ziff "$BASE".."$HEAD" --json
+curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/main/zc -o zc
+chmod +x zc
+./zc "$BASE".."$HEAD" --json
 ```
 
 > When run via `curl … | bash`, `--help` shows only a short usage (the script
@@ -79,17 +79,17 @@ chmod +x ziff
 ## Usage
 
 ```sh
-ziff                       # dirty tree: HEAD -> working tree; clean: branch point with parent -> HEAD
-ziff main                  # compare against the branch point with main (-> working tree if dirty, else HEAD)
-ziff v4.1.0 v4.2.0         # compare two arbitrary refs (exact, no merge-base)
-ziff --with-lock           # include the transitive Cargo.lock diff
-ziff --with-values main    # also flag const/static value + doc changes
-ziff --json main           # machine-readable output for CI
-ziff --changelog main      # draft a librustzcash-style changelog (markdown)
-ziff --version             # version, current commit, and whether it's up to date with origin/main
+zc                       # dirty tree: HEAD -> working tree; clean: branch point with parent -> HEAD
+zc main                  # compare against the branch point with main (-> working tree if dirty, else HEAD)
+zc v4.1.0 v4.2.0         # compare two arbitrary refs (exact, no merge-base)
+zc --with-lock           # include the transitive Cargo.lock diff
+zc --with-values main    # also flag const/static value + doc changes
+zc --json main           # machine-readable output for CI
+zc --changelog main      # draft a librustzcash-style changelog (markdown)
+zc --version             # version, current commit, and whether it's up to date with origin/main
 ```
 
-Run `ziff --help` for the full option and output reference.
+Run `zc --help` for the full option and output reference.
 
 ### `--json`
 
@@ -128,11 +128,11 @@ uses cargo-public-api's git ref-diff form. Build errors show the single-ref
 command to run in a checkout of `ref_sha`; diff errors show the rustdoc JSON
 diff form.
 
-JSON consumers should treat `verdict: error` as an inconclusive analysis. ziff
+JSON consumers should treat `verdict: error` as an inconclusive analysis. zc
 keeps the `--all-features` policy for the public API diff and does not fall back
 to default features automatically, because doing so can hide feature-gated public
 API. Crates whose all-features surface cannot be documented must be fixed,
-excluded outside ziff, or handled by a caller with an explicit feature policy.
+excluded outside zc, or handled by a caller with an explicit feature policy.
 
 ### `--changelog`
 
@@ -173,7 +173,7 @@ type grouping).
 ### Baseline: the branch point, not the tip
 
 When you compare against a parent branch — the default, or a single explicit
-baseline like `ziff main` — ziff diffs from the **branch point** (the merge-base
+baseline like `zc main` — zc diffs from the **branch point** (the merge-base
 of that branch and your head), not the branch's current tip. So commits that
 landed on the parent *after* you branched off (or last merged from it) don't
 show up as spurious added/removed API, and any changelog built from the diff
@@ -182,15 +182,15 @@ describes only what *your* branch changed.
 This is computed entirely from local history — no fetch needed, since any parent
 commit you merged is by definition already a local ancestor. And because
 `merge-base(X, HEAD) == X` whenever `X` is already an ancestor of your head, it's
-a no-op for tags and release commits (`ziff v4.2.0`) and only moves the baseline
+a no-op for tags and release commits (`zc v4.2.0`) and only moves the baseline
 when the parent has genuinely advanced past your branch point. An explicit
-two-ref comparison (`ziff v4.1.0 v4.2.0`) is always taken literally.
+two-ref comparison (`zc v4.1.0 v4.2.0`) is always taken literally.
 
 ## Claude Code skill
 
 `skills/changelog/` bundles a [Claude Code](https://claude.com/claude-code) skill
 that drives the full "draft a changelog for a PR" workflow: it runs
-`ziff --changelog` against the PR's branch point and curates the draft into
+`zc --changelog` against the PR's branch point and curates the draft into
 [librustzcash](https://github.com/zcash/librustzcash)-style `CHANGELOG.md` entries
 (Keep a Changelog sections in `Added`/`Changed`/`Deprecated`/`Removed`/`Fixed`/`Security`
 order — no `### Breaking Changes` section; breaking changes live under `### Changed`/
@@ -208,7 +208,7 @@ Then ask Claude to "produce the changelog for PR #N" (or invoke `/changelog N`).
 
 ## Requirements
 
-- Bash 4+ (associative arrays). On macOS, ziff tries to re-exec with `bash` from PATH, `/opt/homebrew/bin/bash`, or `/usr/local/bin/bash` before failing. Install it with `brew install bash`.
+- Bash 4+ (associative arrays). On macOS, zc tries to re-exec with `bash` from PATH, `/opt/homebrew/bin/bash`, or `/usr/local/bin/bash` before failing. Install it with `brew install bash`.
 - [`cargo-public-api`](https://github.com/cargo-public-api/cargo-public-api)
 - `jq`
 - a `nightly` toolchain for rustdoc JSON builds
@@ -217,7 +217,7 @@ Then ask Claude to "produce the changelog for PR #N" (or invoke `/changelog N`).
 
 - `0` means clean: no breaking API, dependency, or value changes were found.
 - `1` means breaking changes were detected.
-- `2` means analysis error: ziff could not produce a trustworthy verdict. This
+- `2` means analysis error: zc could not produce a trustworthy verdict. This
   includes `cargo public-api` or rustdoc failures for one or more crates.
 - `64` means usage or setup error, such as an unknown option, bad ref, missing
   required tool, or unsupported shell.

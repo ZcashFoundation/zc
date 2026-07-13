@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Integration tests for ziff.
+# Integration tests for zc.
 #
 # Each test builds a throwaway single-crate git repo, mutates its public API
-# (or dependencies), runs ziff against two refs, and asserts the verdict and
+# (or dependencies), runs zc against two refs, and asserts the verdict and
 # exit code. We assert *behavior* (verdict / exit code / a key item name), not
 # exact `cargo public-api` output — that text shifts with the rustc version.
 #
-# Requires the same tools ziff does: cargo-public-api, jq, cargo, a Rust
+# Requires the same tools zc does: cargo-public-api, jq, cargo, a Rust
 # toolchain (with a nightly available, which cargo-public-api uses for rustdoc
 # JSON). Run from anywhere:  tests/run.sh
 set -uo pipefail
 
-ZIFF=${ZIFF:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/ziff"}
+ZC=${ZC:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/zc"}
 pass=0
 fail=0
 
@@ -23,7 +23,7 @@ assert_contains() { case "$1" in *"$2"*) ok "$3" ;; *) bad "$3 (output missing: 
 
 api_cache_file() { # $1=repo  $2=sha  $3=crate
     local repo=$1 sha=$2 crate=$3
-    local cache_dir=$repo/target/ziff-cache
+    local cache_dir=$repo/target/zc-cache
     local file found="" count=0
     [ -d "$cache_dir" ] || return 1
     while IFS= read -r file; do
@@ -36,7 +36,7 @@ api_cache_file() { # $1=repo  $2=sha  $3=crate
 
 api_cache_count_for_sha() { # $1=repo  $2=sha
     local repo=$1 sha=$2
-    local cache_dir=$repo/target/ziff-cache
+    local cache_dir=$repo/target/zc-cache
     [ -d "$cache_dir" ] || { printf '0'; return; }
     find "$cache_dir" -maxdepth 1 -type f -name "${sha}.*.api.json" | wc -l | tr -d ' '
 }
@@ -71,7 +71,7 @@ new_repo() {
     printf '/target\n' >"$d/.gitignore"
     cat >"$d/Cargo.toml" <<'EOF'
 [package]
-name = "ziff_fixture"
+name = "zc_fixture"
 version = "0.1.0"
 edition = "2021"
 EOF
@@ -91,7 +91,7 @@ commit_lib() {
     git -C "$1" rev-parse HEAD
 }
 
-echo "ziff integration tests ($ZIFF)"
+echo "zc integration tests ($ZC)"
 
 # 1) Removing a public item is breaking.
 repo=$(new_repo 'pub fn foo() {}')
@@ -101,7 +101,7 @@ before_head=$(git -C "$repo" rev-parse HEAD)
 before_status=$(git -C "$repo" status --porcelain)
 before_branch=$(git -C "$repo" branch --show-current)
 before_worktrees=$(worktree_count "$repo")
-out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
 assert_eq "$rc" 1 "removed pub fn: exit 1"
 assert_contains "$out" "BREAKING" "removed pub fn: BREAKING verdict"
 assert_contains "$out" "foo" "removed pub fn: names the removed item"
@@ -112,13 +112,13 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn foo() {}\npub fn added() {}' 'add fn')
-out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
 assert_eq "$rc" 0 "additive only: exit 0"
 assert_contains "$out" "OK" "additive only: OK verdict"
 
 # 3) Changing only a private item is no public-API change.
 head2=$(commit_lib "$repo" $'pub fn foo() {}\npub fn added() {}\nfn helper() {}' 'add private fn')
-out=$( cd "$repo" && "$ZIFF" "$head" "$head2" 2>&1 ); rc=$?
+out=$( cd "$repo" && "$ZC" "$head" "$head2" 2>&1 ); rc=$?
 assert_eq "$rc" 0 "private-only change: exit 0"
 assert_contains "$out" "No public API changes" "private-only change: reported as no change"
 rm -rf "$repo"
@@ -127,7 +127,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap')
-json=$( cd "$repo" && "$ZIFF" --json "$base" "$head" 2>/dev/null ); rc=$?
+json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null ); rc=$?
 assert_eq "$rc" 1 "--json: breaking changes exit 1"
 if printf '%s' "$json" | jq -e 'has("totals") and has("crates") and .verdict == "breaking"' >/dev/null 2>&1; then
     ok "--json: valid shape, verdict=breaking"
@@ -139,19 +139,19 @@ rm -rf "$repo"
 # 4b) A crate that fails to document exits 2 and carries structured error data.
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
-head=$(commit_lib "$repo" $'compile_error!("ziff fixture build failure");\npub fn foo() {}' 'break docs')
+head=$(commit_lib "$repo" $'compile_error!("zc fixture build failure");\npub fn foo() {}' 'break docs')
 before_head=$(git -C "$repo" rev-parse HEAD)
 before_status=$(git -C "$repo" status --porcelain)
 before_branch=$(git -C "$repo" branch --show-current)
 before_worktrees=$(worktree_count "$repo")
-json=$( cd "$repo" && "$ZIFF" --json "$base" "$head" 2>/dev/null ); rc=$?
+json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null ); rc=$?
 assert_eq "$rc" 2 "--json: analysis error exits 2"
 if printf '%s' "$json" | jq -e '
     .verdict == "error" and
     .totals.error_crates == 1 and
     .crates[0].status == "error" and
     .crates[0].error.stage == "head_build" and
-    (.crates[0].error.stderr | contains("ziff fixture build failure")) and
+    (.crates[0].error.stderr | contains("zc fixture build failure")) and
     (.crates[0].error.hint | length > 0)
 ' >/dev/null 2>&1; then
     ok "--json: structured crate error includes stage, stderr, hint"
@@ -163,10 +163,10 @@ before_head=$(git -C "$repo" rev-parse HEAD)
 before_status=$(git -C "$repo" status --porcelain)
 before_branch=$(git -C "$repo" branch --show-current)
 before_worktrees=$(worktree_count "$repo")
-out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
 assert_eq "$rc" 2 "human error: analysis error exits 2"
 assert_contains "$out" "stage: head_build" "human error: shows failing stage"
-assert_contains "$out" "ziff fixture build failure" "human error: shows stderr tail"
+assert_contains "$out" "zc fixture build failure" "human error: shows stderr tail"
 assert_repo_unchanged "$repo" "$before_head" "$before_status" "$before_branch" "$before_worktrees" "human error: repository isolation"
 before_head=$(git -C "$repo" rev-parse HEAD)
 before_status=$(git -C "$repo" status --porcelain)
@@ -174,26 +174,26 @@ before_branch=$(git -C "$repo" branch --show-current)
 before_worktrees=$(worktree_count "$repo")
 changelog_stdout_file=$(mktemp)
 changelog_stderr_file=$(mktemp)
-( cd "$repo" && "$ZIFF" --changelog "$base" "$head" >"$changelog_stdout_file" 2>"$changelog_stderr_file" ); rc=$?
+( cd "$repo" && "$ZC" --changelog "$base" "$head" >"$changelog_stdout_file" 2>"$changelog_stderr_file" ); rc=$?
 changelog_stdout=$(cat "$changelog_stdout_file")
 changelog_stderr=$(cat "$changelog_stderr_file")
 rm -f "$changelog_stdout_file" "$changelog_stderr_file"
 assert_eq "$rc" 2 "--changelog error: analysis error exits 2"
 assert_eq "$changelog_stdout" "" "--changelog error: stdout empty"
 assert_contains "$changelog_stderr" "stage: head_build" "--changelog error: stderr shows failing stage"
-assert_contains "$changelog_stderr" "ziff_fixture" "--changelog error: stderr names failing crate"
+assert_contains "$changelog_stderr" "zc_fixture" "--changelog error: stderr names failing crate"
 assert_repo_unchanged "$repo" "$before_head" "$before_status" "$before_branch" "$before_worktrees" "--changelog error: repository isolation"
 rm -rf "$repo"
 
 # 4c) Usage errors use a distinct code.
-out=$( "$ZIFF" --definitely-not-a-ziff-option 2>&1 ); rc=$?
+out=$( "$ZC" --definitely-not-a-zc-option 2>&1 ); rc=$?
 assert_eq "$rc" 64 "usage error: exit 64"
 assert_contains "$out" "unknown option" "usage error: explains the option failure"
 
 # 5) The default baseline is the BRANCH POINT (merge-base with the parent), not
 #    the parent's tip: API changes merged onto the parent *after* we branched
 #    must not leak into our diff. Branch `feature` off `main`, add our own item,
-#    then advance `main` with an unrelated item; `ziff` (no args) on `feature`
+#    then advance `main` with an unrelated item; `zc` (no args) on `feature`
 #    must show our addition and ignore main's post-branch change.
 repo=$(new_repo 'pub fn foo() {}')
 git -C "$repo" branch -M main
@@ -202,7 +202,7 @@ commit_lib "$repo" $'pub fn foo() {}\npub fn feature_fn() {}' 'feature work' >/d
 git -C "$repo" checkout -q main
 commit_lib "$repo" $'pub fn foo() {}\npub fn upstream_fn() {}' 'upstream work after branch' >/dev/null
 git -C "$repo" checkout -q feature
-out=$( cd "$repo" && "$ZIFF" 2>&1 ); rc=$?
+out=$( cd "$repo" && "$ZC" 2>&1 ); rc=$?
 assert_contains "$out" "feature_fn" "merge-base default: shows the branch's own addition"
 case "$out" in
     *upstream_fn*) bad "merge-base default: leaked the parent's post-branch change (upstream_fn)" ;;
@@ -228,7 +228,7 @@ git -C "$repo" remote add origin "$repo"
 git -C "$repo" update-ref refs/remotes/origin/feature "$(git -C "$repo" rev-parse feature)"
 git -C "$repo" config branch.feature.remote origin
 git -C "$repo" config branch.feature.merge refs/heads/feature
-out=$( cd "$repo" && "$ZIFF" 2>&1 ); rc=$?
+out=$( cd "$repo" && "$ZC" 2>&1 ); rc=$?
 assert_contains "$out" "merge-base(main, HEAD)" "self-upstream: baseline falls through to main"
 assert_contains "$out" "feature_fn" "self-upstream: still shows the branch's own addition"
 rm -rf "$repo"
@@ -239,11 +239,11 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub enum Color { Red, Green, Blue }' 'add Color enum')
-out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 )
-if printf '%s\n' "$out" | grep -qE '^ +ziff_fixture$'; then
+out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 )
+if printf '%s\n' "$out" | grep -qE '^ +zc_fixture$'; then
     ok "default: bare module header (no tag)"
 else
-    bad "default: expected a bare 'ziff_fixture' module header"
+    bad "default: expected a bare 'zc_fixture' module header"
 fi
 if printf '%s\n' "$out" | grep -qE '^ +Color +\(enum\)$'; then
     ok "default: type sub-header with (enum) tag"
@@ -258,18 +258,18 @@ else
 fi
 
 # 6b) --by-type uses a flat type header (tagged); members keep the type prefix.
-byt=$( cd "$repo" && "$ZIFF" --by-type "$base" "$head" 2>&1 )
-if printf '%s\n' "$byt" | grep -qE '^ +ziff_fixture::Color +\(enum\)$'; then
+byt=$( cd "$repo" && "$ZC" --by-type "$base" "$head" 2>&1 )
+if printf '%s\n' "$byt" | grep -qE '^ +zc_fixture::Color +\(enum\)$'; then
     ok "--by-type: flat type header with (enum) tag"
 else
-    bad "--by-type: expected 'ziff_fixture::Color  (enum)' header"
+    bad "--by-type: expected 'zc_fixture::Color  (enum)' header"
 fi
 assert_contains "$byt" "+ pub Color::Red" "--by-type: members keep the type prefix"
 
 # 6c) --flat keeps fully-qualified paths and emits no indented group header.
-flat=$( cd "$repo" && "$ZIFF" --flat "$base" "$head" 2>&1 )
-assert_contains "$flat" "pub ziff_fixture::Color::Red" "--flat: keeps fully-qualified paths"
-if printf '%s\n' "$flat" | grep -qE '^ +(ziff_fixture|Color)(::[A-Za-z0-9_]+)*( +\([a-z]+\))?$'; then
+flat=$( cd "$repo" && "$ZC" --flat "$base" "$head" 2>&1 )
+assert_contains "$flat" "pub zc_fixture::Color::Red" "--flat: keeps fully-qualified paths"
+if printf '%s\n' "$flat" | grep -qE '^ +(zc_fixture|Color)(::[A-Za-z0-9_]+)*( +\([a-z]+\))?$'; then
     bad "--flat: should not emit a group header"
 else
     ok "--flat: no group header"
@@ -282,7 +282,7 @@ rm -rf "$repo"
 repo=$(new_repo $'pub trait Speak { fn hello(&self); }')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub trait Speak { fn hello(&self); fn bye(&self); }' 'add trait method bye')
-out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 )
+out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 )
 if printf '%s\n' "$out" | grep -qE '^ +Speak +\(trait\)$'; then
     ok "default: pre-existing type kind read from head source (trait)"
 else
@@ -296,7 +296,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub enum E { A { x: u32 }, B { y: u32 } }' 'add enum with struct-variants')
-out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 )
+out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 )
 nhdr=$(printf '%s\n' "$out" | grep -cE '^ +E +\(enum\)$')
 assert_eq "$nhdr" "1" "clustering: enum header appears exactly once (no duplicate)"
 rm -rf "$repo"
@@ -306,7 +306,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Wrap<T>(pub T);\nimpl Wrap<u32> { pub fn get(&self) -> u32 { self.0 } }' 'add generic Wrap')
-out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 )
+out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 )
 assert_contains "$out" "+ pub fn get(" "generics: type prefix with generic args is factored"
 if printf '%s\n' "$out" | grep -qF 'Wrap<u32>::get'; then
     bad "generics: member should not keep the Wrap<u32>:: prefix"
@@ -318,11 +318,11 @@ rm -rf "$repo"
 # 6g) External-type bucketing: items whose path is in another crate (a trait
 #     impl this crate adds to a foreign type) get a dedicated section.
 ws=$(mktemp -d)
-mkdir -p "$ws/dep/src" "$ws/ziff_fixture/src"
+mkdir -p "$ws/dep/src" "$ws/zc_fixture/src"
 printf '/target\n' >"$ws/.gitignore"
 cat >"$ws/Cargo.toml" <<'EOF'
 [workspace]
-members = ["dep", "ziff_fixture"]
+members = ["dep", "zc_fixture"]
 resolver = "2"
 EOF
 cat >"$ws/dep/Cargo.toml" <<'EOF'
@@ -332,16 +332,16 @@ version = "0.1.0"
 edition = "2021"
 EOF
 echo 'pub struct Foo;' >"$ws/dep/src/lib.rs"
-cat >"$ws/ziff_fixture/Cargo.toml" <<'EOF'
+cat >"$ws/zc_fixture/Cargo.toml" <<'EOF'
 [package]
-name = "ziff_fixture"
+name = "zc_fixture"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 dep = { path = "../dep" }
 EOF
-printf 'pub trait Ext { fn tag(&self) -> u8; }\nimpl Ext for dep::Foo { fn tag(&self) -> u8 { 0 } }\n' >"$ws/ziff_fixture/src/lib.rs"
+printf 'pub trait Ext { fn tag(&self) -> u8; }\nimpl Ext for dep::Foo { fn tag(&self) -> u8 { 0 } }\n' >"$ws/zc_fixture/src/lib.rs"
 git -C "$ws" init -q
 git -C "$ws" config user.email t@t
 git -C "$ws" config user.name t
@@ -350,11 +350,11 @@ git -C "$ws" config commit.gpgsign false
 git -C "$ws" add -A
 git -C "$ws" commit -qm base
 base=$(git -C "$ws" rev-parse HEAD)
-printf 'pub trait Ext { fn tag(&self) -> u8; fn name(&self) -> u8; }\nimpl Ext for dep::Foo { fn tag(&self) -> u8 { 0 } fn name(&self) -> u8 { 1 } }\n' >"$ws/ziff_fixture/src/lib.rs"
+printf 'pub trait Ext { fn tag(&self) -> u8; fn name(&self) -> u8; }\nimpl Ext for dep::Foo { fn tag(&self) -> u8 { 0 } fn name(&self) -> u8 { 1 } }\n' >"$ws/zc_fixture/src/lib.rs"
 git -C "$ws" add -A
 git -C "$ws" commit -qm head
 head=$(git -C "$ws" rev-parse HEAD)
-out=$( cd "$ws" && "$ZIFF" "$base" "$head" 2>&1 )
+out=$( cd "$ws" && "$ZC" "$base" "$head" 2>&1 )
 assert_contains "$out" "[trait impls on external types]" "external: foreign-type items get a dedicated section"
 # The foreign item is bucketed under its real crate (`dep`), not as a module of
 # the analyzed crate.
@@ -370,8 +370,8 @@ rm -rf "$ws"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Widget;\nimpl Widget { pub fn new() -> Self { Widget } pub fn run(&self) {} }' 'add Widget')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
-assert_contains "$out" "## ziff_fixture" "--changelog: per-crate heading"
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+assert_contains "$out" "## zc_fixture" "--changelog: per-crate heading"
 assert_contains "$out" "### Added" "--changelog: Added section"
 assert_contains "$out" "- \`Widget::{new, run}\`" "--changelog: type members brace-grouped on one line"
 rm -rf "$repo"
@@ -382,7 +382,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Verifier;\nimpl Verifier { pub fn check_cross_address_disabled(&self) {} pub fn enforce_nullifier_uniqueness(&self) {} pub fn validate_ironwood_proof_size(&self) {} pub fn validate_orchard_value_balance(&self) {} }' 'add Verifier')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "- \`Verifier\`:" "--changelog: over-wide group uses a type header"
 assert_contains "$out" "  - \`validate_ironwood_proof_size\`" "--changelog: over-wide group members indented as sub-bullets"
 case "$out" in
@@ -397,20 +397,20 @@ rm -rf "$repo"
 #     versioned path deps so the requirement string actually changes (and so the
 #     fixture resolves offline).
 ws=$(mktemp -d)
-mkdir -p "$ws/dep/src" "$ws/dep2/src" "$ws/ziff_fixture/src"
+mkdir -p "$ws/dep/src" "$ws/dep2/src" "$ws/zc_fixture/src"
 printf '/target\n' >"$ws/.gitignore"
 cat >"$ws/Cargo.toml" <<'EOF'
 [workspace]
-members = ["dep", "dep2", "ziff_fixture"]
+members = ["dep", "dep2", "zc_fixture"]
 resolver = "2"
 EOF
 printf '[package]\nname = "dep"\nversion = "0.1.0"\nedition = "2021"\n' >"$ws/dep/Cargo.toml"
 printf '[package]\nname = "dep2"\nversion = "0.1.0"\nedition = "2021"\n' >"$ws/dep2/Cargo.toml"
 echo 'pub struct Foo;' >"$ws/dep/src/lib.rs"
 echo 'pub struct Bar;' >"$ws/dep2/src/lib.rs"
-cat >"$ws/ziff_fixture/Cargo.toml" <<'EOF'
+cat >"$ws/zc_fixture/Cargo.toml" <<'EOF'
 [package]
-name = "ziff_fixture"
+name = "zc_fixture"
 version = "0.1.0"
 edition = "2021"
 
@@ -418,7 +418,7 @@ edition = "2021"
 dep = { path = "../dep", version = "0.1.0" }
 dep2 = { path = "../dep2", version = "0.1.0" }
 EOF
-echo 'pub fn placeholder() {}' >"$ws/ziff_fixture/src/lib.rs"
+echo 'pub fn placeholder() {}' >"$ws/zc_fixture/src/lib.rs"
 git -C "$ws" init -q
 git -C "$ws" config user.email t@t
 git -C "$ws" config user.name t
@@ -427,11 +427,11 @@ git -C "$ws" config commit.gpgsign false
 git -C "$ws" add -A
 git -C "$ws" commit -qm base
 base=$(git -C "$ws" rev-parse HEAD)
-# Bump `dep` to 0.2.0 (updating ziff_fixture's requirement) and drop `dep2`.
+# Bump `dep` to 0.2.0 (updating zc_fixture's requirement) and drop `dep2`.
 printf '[package]\nname = "dep"\nversion = "0.2.0"\nedition = "2021"\n' >"$ws/dep/Cargo.toml"
-cat >"$ws/ziff_fixture/Cargo.toml" <<'EOF'
+cat >"$ws/zc_fixture/Cargo.toml" <<'EOF'
 [package]
-name = "ziff_fixture"
+name = "zc_fixture"
 version = "0.1.0"
 edition = "2021"
 
@@ -442,7 +442,7 @@ EOF
 git -C "$ws" add -A
 git -C "$ws" commit -qm head
 head=$(git -C "$ws" rev-parse HEAD)
-out=$( cd "$ws" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$ws" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "- \`dep\` dependency bumped to \`0.2.0\`." "--changelog: internal dep bump under Changed"
 assert_contains "$out" "- \`dep2\` dependency." "--changelog: dropped dep under Removed"
 rm -rf "$ws"
@@ -453,7 +453,7 @@ rm -rf "$ws"
 repo=$(new_repo $'pub trait IntoDisk { type Bytes; }\npub struct Foo<T>(pub T);')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub trait IntoDisk { type Bytes; }\npub struct Foo<T>(pub T);\nimpl IntoDisk for Foo<u32> { type Bytes = [u8; 48]; }' 'add IntoDisk impl')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "- \`impl IntoDisk for Foo<u32>\`:" "--changelog: added assoc item grouped under impl header with Self generics"
 assert_contains "$out" "- \`Bytes\`" "--changelog: assoc type shown as a bare member under the impl"
 rm -rf "$repo"
@@ -463,7 +463,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn f() -> u8 { 0 }')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" 'pub fn f() -> u16 { 0 }' 'widen return type')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "- \`fn f() -> u8\`" "--changelog: Changed shows the old signature"
 assert_contains "$out" "→ \`fn f() -> u16\`" "--changelog: Changed shows the new signature after an arrow"
 rm -rf "$repo"
@@ -472,16 +472,16 @@ rm -rf "$repo"
 repo=$(mktemp -d)
 git -C "$repo" init -q; git -C "$repo" config user.email t@t; git -C "$repo" config user.name t; git -C "$repo" config commit.gpgsign false
 printf '/target\n' >"$repo/.gitignore"
-printf '[package]\nname = "ziff_fixture"\nversion = "0.1.0"\nedition = "2021"\nrust-version = "1.70"\n' >"$repo/Cargo.toml"
+printf '[package]\nname = "zc_fixture"\nversion = "0.1.0"\nedition = "2021"\nrust-version = "1.70"\n' >"$repo/Cargo.toml"
 mkdir -p "$repo/src"; echo 'pub fn f() {}' >"$repo/src/lib.rs"
 ( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
 git -C "$repo" add -A; git -C "$repo" commit -qm base
 base=$(git -C "$repo" rev-parse HEAD)
-printf '[package]\nname = "ziff_fixture"\nversion = "0.1.0"\nedition = "2021"\nrust-version = "1.75"\n' >"$repo/Cargo.toml"
+printf '[package]\nname = "zc_fixture"\nversion = "0.1.0"\nedition = "2021"\nrust-version = "1.75"\n' >"$repo/Cargo.toml"
 ( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
 git -C "$repo" add -A; git -C "$repo" commit -qm head
 head=$(git -C "$repo" rev-parse HEAD)
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "- MSRV is now 1.75." "--changelog: MSRV bump documented under Changed"
 rm -rf "$repo"
 
@@ -490,7 +490,7 @@ rm -rf "$repo"
 repo=$(new_repo $'pub trait Marker {}\npub struct A;\npub struct B;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub trait Marker {}\npub struct A;\npub struct B;\nimpl Marker for A {}\nimpl Marker for B {}' 'impl Marker on A and B')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "- \`impl Marker\` for:" "--changelog: a trait on multiple types is grouped by trait"
 rm -rf "$repo"
 
@@ -500,7 +500,7 @@ rm -rf "$repo"
 repo=$(new_repo $'pub trait T { fn m(&self); }\npub struct S;\nimpl T for S { fn m(&self) {} }')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub trait T { fn m(&self); }\npub struct S;' 'remove impl T for S')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "- \`impl T for S\`:" "--changelog: removed impl method grouped under its impl (base map)"
 rm -rf "$repo"
 
@@ -510,7 +510,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub struct Foo;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub struct Foo;\nimpl<\'a> From<&\'a u8> for Foo { fn from(_: &\'a u8) -> Self { Foo } }' 'add lifetime-param impl')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "impl From<&u8> for Foo" "--changelog: impl<'a> recognized; lifetime stripped"
 case "$out" in
 *'::impl`'* | *'- `impl`'*) bad "--changelog: impl<'a> must not collapse to a stray 'impl' member" ;;
@@ -525,7 +525,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub struct Foo;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub struct Foo;\npub mod sub { pub struct Bar; }\nimpl From<core::option::Option<sub::Bar>> for Foo { fn from(_: core::option::Option<sub::Bar>) -> Self { Foo } }' 'add nested From')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "impl From<option::Option<sub::Bar>> for Foo" "--changelog: keep one module segment + nested generics"
 rm -rf "$repo"
 
@@ -534,7 +534,7 @@ rm -rf "$repo"
 repo=$(new_repo $'pub struct Foo;\npub struct Bar;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub struct Foo;\npub struct Bar;\nimpl From<Bar> for Foo { fn from(_: Bar) -> Self { Foo } }' 'add From<Bar>')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "impl From<Bar> for Foo" "--changelog: From impl is documented"
 case "$out" in
 *'`from`'*) bad "--changelog: a From impl must not list its boilerplate 'from' method" ;;
@@ -547,7 +547,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\n#[derive(PartialEq)]\npub struct X(pub u8);' 'derive PartialEq')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "impl PartialEq for X" "--changelog: real derived impl kept"
 case "$out" in
 *StructuralPartialEq*) bad "--changelog: StructuralPartialEq compiler marker must be dropped" ;;
@@ -561,7 +561,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub const fn answer() -> u8 { 42 }' 'add const fn')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "- \`answer\`" "--changelog: const fn keeps its name"
 case "$out" in
 *'- `fn`'*) bad "--changelog: const fn must not collapse to a stray 'fn' group" ;;
@@ -574,7 +574,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\n#[derive(Hash)]\npub struct K(pub u8);' 'derive Hash')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "impl Hash for K" "--changelog: -ss surfaces auto-derived impls"
 rm -rf "$repo"
 
@@ -583,7 +583,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub struct Foo;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub struct Foo;\n#[derive(Clone, Debug)]\npub struct Bar(pub u8);' 'derive Clone, Debug on Bar')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "impl {Clone, Debug} for Bar" "--changelog: derives on one type collapse to impl {..} for T"
 rm -rf "$repo"
 
@@ -592,7 +592,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub fn sibling() -> u8 { 0 }\npub mod m { pub struct Foo; pub fn g() -> u8 { 0 } }' 'add module m and a sibling fn')
-out=$( cd "$repo" && "$ZIFF" --changelog "$base" "$head" 2>/dev/null )
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "- \`m\`" "--changelog: an added module is listed on its own"
 assert_contains "$out" "- \`sibling\`" "--changelog: items outside the module are unaffected"
 case "$out" in
@@ -605,14 +605,14 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap foo -> bar')
-out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
 assert_eq "$rc" 1 "api cache hit: initial diff exit 1"
-base_cache=$(api_cache_file "$repo" "$base" ziff_fixture) || base_cache=""
-head_cache=$(api_cache_file "$repo" "$head" ziff_fixture) || head_cache=""
+base_cache=$(api_cache_file "$repo" "$base" zc_fixture) || base_cache=""
+head_cache=$(api_cache_file "$repo" "$head" zc_fixture) || head_cache=""
 if [ -n "$base_cache" ] && [ -n "$head_cache" ]; then
     ok "api cache hit: populated both ref cache files"
     if cp "$base_cache" "$head_cache"; then
-        out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+        out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
         assert_eq "$rc" 0 "api cache hit: tampered cache consumed"
         assert_contains "$out" "No public API changes" "api cache hit: tampered cache hides diff"
     else
@@ -626,15 +626,15 @@ rm -rf "$repo"
 # 8) Startup GC removes old rustdoc JSON cache entries and keeps fresh ones.
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
-cache_dir="$repo/target/ziff-cache"
+cache_dir="$repo/target/zc-cache"
 mkdir -p "$cache_dir"
-old_cache="$cache_dir/old.fp.ziff_fixture.api.json"
-fresh_cache="$cache_dir/fresh.fp.ziff_fixture.api.json"
+old_cache="$cache_dir/old.fp.zc_fixture.api.json"
+fresh_cache="$cache_dir/fresh.fp.zc_fixture.api.json"
 printf '%s\n' '{}' >"$old_cache"
 printf '%s\n' '{}' >"$fresh_cache"
 touch -t 200001010000 "$old_cache"
-( cd "$repo" && "$ZIFF" "$base" "$base" >/dev/null 2>&1 ); rc=$?
-assert_eq "$rc" 0 "api cache gc: ziff run succeeds"
+( cd "$repo" && "$ZC" "$base" "$base" >/dev/null 2>&1 ); rc=$?
+assert_eq "$rc" 0 "api cache gc: zc run succeeds"
 if [ ! -e "$old_cache" ]; then
     ok "api cache gc: old api json removed"
 else
@@ -650,7 +650,7 @@ rm -rf "$repo"
 # 9) Dirty working-tree snapshots are not written to the rustdoc JSON cache.
 repo=$(new_repo 'pub fn foo() {}')
 printf '%s\n' 'pub fn bar() {}' >"$repo/src/lib.rs"
-json=$( cd "$repo" && "$ZIFF" --json 2>/dev/null ); rc=$?
+json=$( cd "$repo" && "$ZC" --json 2>/dev/null ); rc=$?
 assert_eq "$rc" 1 "snapshot api cache: dirty diff exit 1"
 snapshot_short=$(printf '%s' "$json" | jq -r '.head_sha // empty')
 snapshot_sha=$(git -C "$repo" rev-parse --verify "${snapshot_short}^{commit}" 2>/dev/null || true)
@@ -666,12 +666,12 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap foo -> bar')
-out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
 assert_eq "$rc" 1 "corrupt api cache: initial diff exit 1"
-head_cache=$(api_cache_file "$repo" "$head" ziff_fixture) || head_cache=""
+head_cache=$(api_cache_file "$repo" "$head" zc_fixture) || head_cache=""
 if [ -n "$head_cache" ]; then
     printf '%s\n' 'not json' >"$head_cache"
-    out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+    out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
     assert_eq "$rc" 1 "corrupt api cache: rebuild preserves verdict"
     assert_contains "$out" "BREAKING" "corrupt api cache: breaking verdict retained"
     if jq -e . "$head_cache" >/dev/null 2>&1; then
@@ -680,7 +680,7 @@ if [ -n "$head_cache" ]; then
         bad "corrupt api cache: cache was not overwritten with JSON"
     fi
     printf '%s\n' '{}' >"$head_cache"
-    out=$( cd "$repo" && "$ZIFF" "$base" "$head" 2>&1 ); rc=$?
+    out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
     assert_eq "$rc" 1 "empty-object api cache: rebuild preserves verdict"
     assert_contains "$out" "BREAKING" "empty-object api cache: breaking verdict retained"
     if jq -e 'has("format_version") and has("root") and has("index")' "$head_cache" >/dev/null 2>&1; then
@@ -693,19 +693,19 @@ else
 fi
 rm -rf "$repo"
 
-# 11) --version prints the version and commit, and honors ZIFF_NO_UPDATE_CHECK.
-ver=$(grep -m1 '^ZIFF_VERSION=' "$ZIFF" | cut -d= -f2)
-out=$( ZIFF_NO_UPDATE_CHECK=1 "$ZIFF" --version 2>&1 ); rc=$?
+# 11) --version prints the version and commit, and honors ZC_NO_UPDATE_CHECK.
+ver=$(grep -m1 '^ZC_VERSION=' "$ZC" | cut -d= -f2)
+out=$( ZC_NO_UPDATE_CHECK=1 "$ZC" --version 2>&1 ); rc=$?
 assert_eq "$rc" 0 "--version: exit 0"
-assert_contains "$out" "ziff $ver" "--version: prints 'ziff <ZIFF_VERSION>'"
+assert_contains "$out" "zc $ver" "--version: prints 'zc <ZC_VERSION>'"
 assert_contains "$out" "commit:" "--version: prints a commit line"
 case "$out" in
-    *update:*) bad "--version: ZIFF_NO_UPDATE_CHECK should suppress the update line" ;;
-    *) ok "--version: ZIFF_NO_UPDATE_CHECK suppresses the update line" ;;
+    *update:*) bad "--version: ZC_NO_UPDATE_CHECK should suppress the update line" ;;
+    *) ok "--version: ZC_NO_UPDATE_CHECK suppresses the update line" ;;
 esac
-out=$( ZIFF_NO_UPDATE_CHECK=1 "$ZIFF" -V 2>&1 ); rc=$?
+out=$( ZC_NO_UPDATE_CHECK=1 "$ZC" -V 2>&1 ); rc=$?
 assert_eq "$rc" 0 "-V alias: exit 0"
-assert_contains "$out" "ziff $ver" "-V alias: prints the version line"
+assert_contains "$out" "zc $ver" "-V alias: prints the version line"
 
 echo ""
 echo "passed: $pass  failed: $fail"
