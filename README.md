@@ -35,6 +35,29 @@ under a per-run temp directory. Public API builds use target dirs in that temp
 directory, so the invoking checkout's HEAD, branch, index, working tree, and
 `Cargo.lock` are not checked out over or built in. The worktrees are removed on exit.
 
+## GitHub Actions
+
+Use the action in a pull request workflow after checking out the pull request head with complete history:
+
+```yaml
+permissions:
+  contents: read
+
+steps:
+  - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+      fetch-depth: 0
+      persist-credentials: false
+  - uses: ZcashFoundation/zc@v0.3.0
+    with:
+      baseline: origin/${{ github.base_ref }}
+```
+
+The action installs the `cargo-public-api` and Rust nightly versions tested with that `zc` release. It compares the pull request head with its branch point from the baseline, then fails with the same exit-code contract as the CLI. Set `head` when both refs must be compared literally, or enable `with-lock` and `with-values` for the optional analyses.
+
+Pin the action to a full commit SHA when the workflow requires an immutable dependency.
+
 ## Cache
 
 zc stores persistent cache files under `target/zc-cache/`, or under
@@ -54,27 +77,21 @@ state for a checkout.
 First install the prerequisites (see [Requirements](#requirements)):
 
 ```sh
-cargo install cargo-public-api    # required; jq is also required
+cargo install cargo-public-api --version 0.52.0 --locked
+rustup toolchain install nightly-2026-07-18 --profile minimal
 ```
 
 Then get `zc` itself — it's a single Bash script. Install it onto your `PATH`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/main/zc -o ~/.local/bin/zc && chmod +x ~/.local/bin/zc
+curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/v0.3.0/zc -o ~/.local/bin/zc
+chmod +x ~/.local/bin/zc
 ```
 
 …or run a one-off without installing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/main/zc | bash -s -- main
-```
-
-In CI, the download-then-run form is the most robust:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/main/zc -o zc
-chmod +x zc
-./zc "$BASE".."$HEAD" --json
+curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/v0.3.0/zc | bash -s -- main
 ```
 
 > When run via `curl … | bash`, `--help` shows only a short usage (the script
@@ -91,7 +108,7 @@ zc --with-lock           # include the transitive Cargo.lock diff
 zc --with-values main    # also flag const/static value + doc changes
 zc --json main           # machine-readable output for CI
 zc --changelog main      # draft a librustzcash-style changelog (markdown)
-zc --version             # version, current commit, and whether it's up to date with origin/main
+zc --version             # print the installed version
 ```
 
 Run `zc --help` for the full option and output reference.
