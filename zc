@@ -627,13 +627,54 @@ baseline_short=$(git rev-parse --short "$baseline" 2>/dev/null || echo "$baselin
 # ones. `cargo metadata` also resolves feature flags and renames accurately,
 # which a `sed` parse of `Cargo.toml` cannot.
 
-# Classify a version bump: returns "major", "minor", or "patch".
-# For 0.x crates, a minor bump (0.1 -> 0.2) is treated as major per semver.
-# Pre-release (-rc1) and build-metadata (+abc) suffixes are stripped before
-# comparing — they don't affect semver precedence at the major/minor/patch
-# level.
+# Normalize a requirement for comparison: drop whitespace, a leading caret (bare
+# and caret requirements are the same set in Cargo), and pre-release / build
+# metadata. Metadata does not move the major/minor/patch triple, so `1.0.0-rc1`
+# and `1.0.0` normalize alike — the shape a crate graduating a pre-release
+# produces, which must not read as a compatibility change.
+req_norm() { # $1=requirement -> stdout normalized requirement
+    local r=${1// /}
+    r=${r#^}
+    printf '%s' "${r//[-+][0-9A-Za-z.]*/}"
+}
+
+# Reduce a requirement to the version it starts at. These strings come from
+# `cargo metadata`'s `req`, which is not always a single version: it carries
+# comparison operators (`~0.29`, `=0.0.1`), ranges (`>=0.29, <0.31`), and
+# wildcards (`0.29.*`). Keep the first version literal, so an operator is dropped,
+# a range is represented by its floor — the version a consumer has to unify with —
+# and a wildcard by its numeric prefix.
+req_version() { # $1=requirement -> stdout bare version ("" when none)
+    local r
+    r=$(req_norm "$1")
+    r=${r#"${r%%[0-9]*}"}
+    r=${r%%[!0-9.]*}
+    printf '%s' "${r%.}"
+}
+
+# Classify a version bump: returns "major", "minor", "patch", or "unknown".
+# "major" means semver-incompatible under Cargo's caret rules, i.e. a change to
+# the leftmost nonzero component. So for a 0.x crate a minor bump (0.1 -> 0.2) is
+# major, and for a 0.0.x crate (where `^0.0.1` admits only 0.0.1) even a patch
+# bump (0.0.1 -> 0.0.2) is major.
+#
+# "unknown" is for a requirement that changed without moving the version it
+# starts at, so the change is in an operator, a ceiling, or an added clause and
+# the requirement text alone does not say whether a consumer is affected. Both
+# `>=0.29,<0.31` -> `>=0.29,<0.30` (0.30 leaves the resolvable set) and `>=0.29`
+# -> `>0.29` (0.29 itself leaves it) land here. Deciding them needs the resolved
+# versions, which this comparison does not have.
+#
+# Callers that must not raise a false alarm treat "unknown" as not-breaking; the
+# public-dependency join treats it as a candidate, since there it is filtered by
+# whether the dependency is reachable in the crate's public API.
 classify_bump() {
-    local old=${1%%[-+]*} new=${2%%[-+]*}
+    local old new
+    old=$(req_version "$1") new=$(req_version "$2")
+    if [ "$old" = "$new" ] && [ "$(req_norm "$1")" != "$(req_norm "$2")" ]; then
+        echo "unknown"
+        return
+    fi
     local old_major=${old%%.*} new_major=${new%%.*}
     if [ "$old_major" != "$new_major" ]; then
         echo "major"
@@ -643,6 +684,12 @@ classify_bump() {
     local old_minor=${old_rest%%.*} new_minor=${new_rest%%.*}
     if [ "$old_minor" != "$new_minor" ]; then
         if [ "$old_major" = "0" ]; then echo "major"; else echo "minor"; fi
+        return
+    fi
+    # 0.0.x: the patch component is the leftmost nonzero one, so a patch bump is
+    # breaking as well — `^0.0.1` does not admit 0.0.2.
+    if [ "$old_major" = "0" ] && [ "$old_minor" = "0" ] && [ "$old" != "$new" ]; then
+        echo "major"
         return
     fi
     echo "patch"
@@ -1567,7 +1614,12 @@ compute_pubdep_breaks() { # $1=crate
         bq=${pubdep_req_base["$crate|$dep"]:-}
         hq=${pubdep_req_head["$crate|$dep"]:-}
         { [ -z "$bq" ] || [ -z "$hq" ] || [ "$bq" = "$hq" ]; } && continue
-        [ "$(classify_bump "$bq" "$hq")" = major ] && majors+=("$dep")
+        # `unknown` (a compound/wildcard requirement whose floor held) is kept as
+        # a candidate: it may or may not be compatible, and the public-API
+        # reachability check below is what decides whether it is worth reporting.
+        case $(classify_bump "$bq" "$hq") in
+        major | unknown) majors+=("$dep") ;;
+        esac
     done <<<"$ext"
     [ ${#majors[@]} -gt 0 ] || return 0
     # Full public API surface at head (the diff is empty in exactly the case we
@@ -2702,7 +2754,17 @@ if $changelog_mode; then
         [ -n "${crate_pubdep_lines[$i]}" ] || continue
         while IFS=$'\t' read -r dep old new; do
             [ -z "$dep" ] && continue
-            pubdep_md["${crate_names[$i]}"]+="- Public dependency \`${dep}\` upgraded to \`${new}\` (major); it appears in this crate's public API, so this is a breaking change."$'\n'
+            # Only a proven-incompatible bump may assert a break. An "unknown"
+            # requirement change is a review item, not a major-version trigger.
+            case $(classify_bump "$old" "$new") in
+            major)
+                bullet="- Public dependency \`${dep}\` upgraded to \`${new}\`; its types appear in this crate's public API, so downstream users must upgrade \`${dep}\` in lockstep."
+                ;;
+            *)
+                bullet="- Public dependency \`${dep}\` requirement changed to \`${new}\`; its types appear in this crate's public API, so check whether downstream users are affected."
+                ;;
+            esac
+            pubdep_md["${crate_names[$i]}"]+="${bullet}"$'\n'
         done <<<"${crate_pubdep_lines[$i]}"
     done
 

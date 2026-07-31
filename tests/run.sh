@@ -779,6 +779,95 @@ else
     bad "public-dep: renamed dep should join, got: $(printf '%s' "$json" | jq -c '.public_dep_breaks' 2>/dev/null)"
 fi
 rm -rf "$repo"
+# 12d) A 0.0.x dependency: `^0.0.1` admits only 0.0.1, so 0.0.1 -> 0.0.2 is
+#      semver-incompatible even though it looks like a patch bump. A crate that
+#      re-exposes such a dep must still be flagged.
+repo=$(mktemp -d)
+git -C "$repo" init -q
+git -C "$repo" config user.email t@t
+git -C "$repo" config user.name t
+git -C "$repo" config commit.gpgsign false
+printf '/target\n' >"$repo/.gitignore"
+printf '[workspace]\nmembers = ["foo"]\nexclude = ["bar"]\nresolver = "2"\n' >"$repo/Cargo.toml"
+mkdir -p "$repo/foo/src" "$repo/bar/src"
+printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nbar = { path = "../bar", version = "0.0.1" }\n' >"$repo/foo/Cargo.toml"
+printf 'pub fn f() -> Result<(), bar::Error> { Ok(()) }\n' >"$repo/foo/src/lib.rs"
+printf '[package]\nname = "bar"\nversion = "0.0.1"\nedition = "2021"\n' >"$repo/bar/Cargo.toml"
+printf 'pub struct Error;\n' >"$repo/bar/src/lib.rs"
+( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
+git -C "$repo" add -A
+git -C "$repo" commit -qm base
+base=$(git -C "$repo" rev-parse HEAD)
+printf '[package]\nname = "bar"\nversion = "0.0.2"\nedition = "2021"\n' >"$repo/bar/Cargo.toml"
+printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nbar = { path = "../bar", version = "0.0.2" }\n' >"$repo/foo/Cargo.toml"
+( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
+git -C "$repo" add -A
+git -C "$repo" commit -qm head
+head=$(git -C "$repo" rev-parse HEAD)
+json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null )
+if printf '%s' "$json" | jq -e '.public_dep_breaks | any(.crate == "foo" and .dep == "bar" and .new == "0.0.2")' >/dev/null 2>&1; then
+    ok "public-dep: 0.0.x patch bump is semver-incompatible and joins"
+else
+    bad "public-dep: 0.0.1 -> 0.0.2 should join, got: $(printf '%s' "$json" | jq -c '.public_dep_breaks' 2>/dev/null)"
+fi
+rm -rf "$repo"
+
+# 12e) A requirement carrying a comparison operator (`~0.1` -> `~0.2`) classifies
+#      like the bare version, rather than letting the operator ride along in the
+#      major component and silently downgrade the bump.
+repo=$(new_pubdep_repo 'bar = { path = "../bar", version = "~0.1" }' 'pub fn f() -> Result<(), bar::Error> { Ok(()) }')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(bump_pubdep_head "$repo" 'bar = { path = "../bar", version = "~0.2" }')
+json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null )
+if printf '%s' "$json" | jq -e '.public_dep_breaks | any(.crate == "foo" and .dep == "bar")' >/dev/null 2>&1; then
+    ok "public-dep: operator-prefixed requirement (~0.1 -> ~0.2) still joins"
+else
+    bad "public-dep: ~0.1 -> ~0.2 should join, got: $(printf '%s' "$json" | jq -c '.public_dep_breaks' 2>/dev/null)"
+fi
+rm -rf "$repo"
+
+# 13) Requirement classification, pinned directly. `cargo metadata` reports `req`
+#     strings that are not always a single version — operators, ranges, wildcards,
+#     pre-release metadata — and every dependency verdict rests on reading them
+#     correctly. Both helpers are pure, so extract and source them.
+cb_defs=$(mktemp)
+sed -n '/^req_norm() {/,/^}/p;/^req_version() {/,/^}/p;/^classify_bump() {/,/^}/p' "$ZC" >"$cb_defs"
+# shellcheck source=/dev/null
+. "$cb_defs"
+rm -f "$cb_defs"
+check_bump() { # $1=old  $2=new  $3=expected
+    assert_eq "$(classify_bump "$1" "$2")" "$3" "classify_bump: $1 -> $2 is $3"
+}
+# Cargo's caret rules: the leftmost nonzero component decides compatibility.
+check_bump 1.2.3 2.0.0 major
+check_bump 1.2.3 1.3.0 minor
+check_bump 1.2.3 1.2.4 patch
+check_bump 0.1 0.2 major
+check_bump 0.29 0.30 major
+check_bump 0.0.1 0.0.2 major
+check_bump 0.0.1 0.0.1 patch
+# Operators are not part of the version, and metadata does not move the triple —
+# the shape a crate graduating a pre-release produces.
+check_bump '~0.29' '~0.30' major
+check_bump '=0.0.1' '=0.0.2' major
+check_bump '1.0.0-rc1' '1.0.0' patch
+check_bump '0.30.0-pre.0' '0.30.0' patch
+# A compound range is represented by its floor, so a moved floor still classifies.
+check_bump '>=0.29, <0.31' '>=0.30, <0.32' major
+# But with the floor held, the change is confined to the ceiling, and the
+# requirement text alone does not say whether a consumer is affected: narrowing
+# drops a version from the resolvable set, widening admits one. Neither is
+# decidable here, so neither is guessed.
+check_bump '>=0.29, <0.31' '>=0.29, <0.30' unknown
+check_bump '>=0.29, <0.31' '>=0.29, <0.32' unknown
+# Same reasoning for an operator swap that keeps the version but changes the set.
+check_bump '>=0.29' '>0.29' unknown
+check_bump '^0.29' '~0.29' unknown
+# A bare requirement and a caret requirement are the same set, so that is no change.
+check_bump '0.29' '^0.29' patch
+# A wildcard reduces to its numeric prefix; a bare `*` names no version at all.
+check_bump '0.29.*' '0.30.*' major
+check_bump '*' '*' patch
 
 echo ""
 echo "passed: $pass  failed: $fail"
