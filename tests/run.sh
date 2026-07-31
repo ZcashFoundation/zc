@@ -447,6 +447,60 @@ assert_contains "$out" "- \`dep\` dependency bumped to \`0.2.0\`." "--changelog:
 assert_contains "$out" "- \`dep2\` dependency." "--changelog: dropped dep under Removed"
 rm -rf "$ws"
 
+# 6i2) --changelog documents an *external* dependency requirement change as a
+#      "Migrated to" line under ### Changed. Branch coverage for that line, which
+#      zc emits for every external requirement change whether or not the
+#      dependency is reachable in the public API; test 12 covers the reachable
+#      case, where the break is folded into this same line. `ext_dep` is
+#      `exclude`d from the workspace so it resolves offline via a path while
+#      still counting as external (scope "ext", not "int").
+ws=$(mktemp -d)
+mkdir -p "$ws/ext_dep/src" "$ws/zc_fixture/src"
+printf '/target\n' >"$ws/.gitignore"
+cat >"$ws/Cargo.toml" <<'EOF'
+[workspace]
+members = ["zc_fixture"]
+exclude = ["ext_dep"]
+resolver = "2"
+EOF
+printf '[package]\nname = "ext_dep"\nversion = "0.29.0"\nedition = "2021"\n' >"$ws/ext_dep/Cargo.toml"
+echo 'pub struct Foo;' >"$ws/ext_dep/src/lib.rs"
+cat >"$ws/zc_fixture/Cargo.toml" <<'EOF'
+[package]
+name = "zc_fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ext_dep = { path = "../ext_dep", version = "0.29.0" }
+EOF
+echo 'pub fn placeholder() {}' >"$ws/zc_fixture/src/lib.rs"
+git -C "$ws" init -q
+git -C "$ws" config user.email t@t
+git -C "$ws" config user.name t
+git -C "$ws" config commit.gpgsign false
+( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
+git -C "$ws" add -A
+git -C "$ws" commit -qm base
+base=$(git -C "$ws" rev-parse HEAD)
+printf '[package]\nname = "ext_dep"\nversion = "0.30.0"\nedition = "2021"\n' >"$ws/ext_dep/Cargo.toml"
+cat >"$ws/zc_fixture/Cargo.toml" <<'EOF'
+[package]
+name = "zc_fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ext_dep = { path = "../ext_dep", version = "0.30.0" }
+EOF
+( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
+git -C "$ws" add -A
+git -C "$ws" commit -qm head
+head=$(git -C "$ws" rev-parse HEAD)
+out=$( cd "$ws" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+assert_contains "$out" "- Migrated to \`ext_dep 0.30.0\`." "--changelog: external dep bump under Changed"
+rm -rf "$ws"
+
 # 6j) An *added* trait impl's associated item is grouped under its `impl Trait
 #     for Self` header (the trait recovered from rustdoc, the Self generics from
 #     the signature) rather than under a bare `Foo` type.
@@ -752,7 +806,11 @@ else
 fi
 out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "## foo" "public-dep --changelog: foo section present"
-assert_contains "$out" 'Public dependency `bar`' "public-dep --changelog: names the breaking dep"
+assert_contains "$out" "- Migrated to \`bar 0.2\`; its types appear in this crate's public API, so downstream users must upgrade \`bar\` in lockstep." "public-dep --changelog: break folded into the single Migrated entry"
+case "$out" in
+*'Public dependency'*) bad "public-dep --changelog: break must not add a second bullet beside Migrated to" ;;
+*) ok "public-dep --changelog: one bullet per dependency change" ;;
+esac
 rm -rf "$repo"
 
 # 12b) Negative: same bump, but the foreign type is used only in a private fn.
@@ -868,6 +926,46 @@ check_bump '0.29' '^0.29' patch
 # A wildcard reduces to its numeric prefix; a bare `*` names no version at all.
 check_bump '0.29.*' '0.30.*' major
 check_bump '*' '*' patch
+# 12f) A reachable dependency whose requirement changed without moving the version
+#      it starts at is a review item, not a break: widening a ceiling cannot be
+#      shown incompatible from the requirement text. It must be reported, must say
+#      so rather than demanding a lockstep upgrade, and must not flip the verdict —
+#      otherwise a consumer's CI fails on a compatible change.
+repo=$(mktemp -d)
+git -C "$repo" init -q
+git -C "$repo" config user.email t@t
+git -C "$repo" config user.name t
+git -C "$repo" config commit.gpgsign false
+printf '/target\n' >"$repo/.gitignore"
+printf '[workspace]\nmembers = ["foo"]\nexclude = ["bar"]\nresolver = "2"\n' >"$repo/Cargo.toml"
+mkdir -p "$repo/foo/src" "$repo/bar/src"
+printf '[package]\nname = "bar"\nversion = "0.1.0"\nedition = "2021"\n' >"$repo/bar/Cargo.toml"
+printf 'pub struct Error;\n' >"$repo/bar/src/lib.rs"
+printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nbar = { path = "../bar", version = ">=0.1, <0.3" }\n' >"$repo/foo/Cargo.toml"
+printf 'pub fn f() -> Result<(), bar::Error> { Ok(()) }\n' >"$repo/foo/src/lib.rs"
+( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
+git -C "$repo" add -A
+git -C "$repo" commit -qm base
+base=$(git -C "$repo" rev-parse HEAD)
+printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nbar = { path = "../bar", version = ">=0.1, <0.4" }\n' >"$repo/foo/Cargo.toml"
+( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
+git -C "$repo" add -A
+git -C "$repo" commit -qm head
+head=$(git -C "$repo" rev-parse HEAD)
+json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null ); rc=$?
+assert_eq "$rc" 0 "public-dep review: an undecidable requirement change does not fail the run"
+if printf '%s' "$json" | jq -e '.verdict == "ok" and .totals.public_dep_breaking == 0 and (.public_dep_breaks | any(.crate == "foo" and .dep == "bar" and .class == "review"))' >/dev/null 2>&1; then
+    ok "public-dep review: reported as class review, excluded from the breaking count"
+else
+    bad "public-dep review: expected an ok verdict with a review entry, got: $(printf '%s' "$json" | jq -c '{verdict, t: .totals.public_dep_breaking, b: .public_dep_breaks}' 2>/dev/null)"
+fi
+out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+assert_contains "$out" "- Migrated to \`bar >=0.1, <0.4\`; its types appear in this crate's public API, so check whether downstream users are affected." "public-dep review --changelog: asks for review in the single Migrated entry"
+case "$out" in
+*"must upgrade"* | *"breaking change"*) bad "public-dep review --changelog: an undecidable change must not assert a break" ;;
+*) ok "public-dep review --changelog: no break asserted" ;;
+esac
+rm -rf "$repo"
 
 echo ""
 echo "passed: $pass  failed: $fail"

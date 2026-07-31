@@ -123,8 +123,11 @@ Top-level fields:
 - `verdict`: `ok`, `breaking`, or `error`
 - `totals`: API, dependency, value, doc, public-dep, and error counts
 - `deps`, `values`, `docs`: structured diff details
-- `public_dep_breaks`: `[{crate, dep, old, new}]` — crates whose public API
-  re-exposes a major-bumped external dependency
+- `public_dep_breaks`: `[{crate, dep, old, new, class}]` — crates whose public API
+  re-exposes a changed external dependency. Class `breaking` is a provably
+  semver-incompatible requirement change; `review` is one whose compatibility the
+  requirement text does not settle, such as a narrowed or widened version ceiling.
+  Only `breaking` entries count toward `totals.public_dep_breaking` and the verdict.
 - `crates`: one entry per workspace crate, sorted by crate name
 
 A crate error has this shape:

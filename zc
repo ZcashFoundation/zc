@@ -106,7 +106,7 @@
 #                          error_crates,             # cargo-public-api fails
 #                          value_changed,            # const/static value changes
 #                          doc_changed,              # doc-comment changes
-#                          public_dep_breaking       # public-dep major bumps
+#                          public_dep_breaking       # public-dep incompatible
 #                        },
 #                        deps: {
 #                          removed: [ {name, version, kind} ],
@@ -115,7 +115,8 @@
 #                        },
 #                        values: [ {crate, path, type, old, new} ],
 #                        docs:   [ {crate, path} ],
-#                        public_dep_breaks: [ {crate, dep, old, new} ],
+#                        public_dep_breaks: [ {crate, dep, old, new,
+#                                             class} ],   # breaking|review
 #                        crates: [
 #                          { name, removed, changed, added, status,
 #                            error: null | {
@@ -2071,10 +2072,21 @@ if $with_values; then
 fi
 
 # Total public-dependency semver breaks across all crates.
+# A reachable dependency change is only a *break* when its requirement change is
+# provably incompatible. An "unknown" one is a review item, so it is reported and
+# counted separately and never flips the verdict — otherwise widening a version
+# ceiling would fail a consumer's CI.
 pubdep_break_total=0
+pubdep_review_total=0
 for pd in "${crate_pubdep_lines[@]:-}"; do
     [ -n "$pd" ] || continue
-    pubdep_break_total=$((pubdep_break_total + $(printf '%s' "$pd" | grep -c . || true)))
+    while IFS=$'\t' read -r pd_dep pd_old pd_new; do
+        [ -z "$pd_dep" ] && continue
+        case $(classify_bump "$pd_old" "$pd_new") in
+        major) pubdep_break_total=$((pubdep_break_total + 1)) ;;
+        *) pubdep_review_total=$((pubdep_review_total + 1)) ;;
+        esac
+    done <<<"$pd"
 done
 
 # ── summary ───────────────────────────────────────────────────────────
@@ -2084,7 +2096,8 @@ echo "${BOLD}Summary${RESET}  ${DIM}(${changed_crate_count}/${crate_count} crate
 
 # Only show the table if there are changes; otherwise a one-liner suffices.
 # In JSON mode we always fall through so the JSON block below emits.
-if [ $((removed_total + changed_total + added_total + value_changed_total + doc_changed_total)) -eq 0 ] && [ "$error_crate_count" -eq 0 ] && [ "$pubdep_break_total" -eq 0 ]; then
+if [ $((removed_total + changed_total + added_total + value_changed_total + doc_changed_total)) -eq 0 ] && [ "$error_crate_count" -eq 0 ] && [ "$pubdep_break_total" -eq 0 ] &&
+    [ "$pubdep_review_total" -eq 0 ]; then
     echo ""
     echo "  ${GREEN}No public API changes.${RESET}"
     # In changelog mode, fall through even with no API changes: a crate may still
@@ -2746,25 +2759,36 @@ if $changelog_mode; then
         ' <(printf '%s\n' "$pc_base") <(printf '%s\n' "$pc_head"))
     fi
 
-    # Public-dependency semver breaks per crate: a `### Changed` prose note so the
-    # curator bumps the crate to a major version. Without it the draft shows
-    # nothing for a crate whose only break is a re-exposed major-bumped dep.
+    # Public-dependency requirement changes per crate: a `### Changed` prose note
+    # for each dependency that changed and whose types are reachable in the crate's
+    # public API. Without it the draft shows nothing for a crate whose only change
+    # is a re-exposed dependency, since the signature text is identical. A `major`
+    # change is a proven break and says the curator must bump the crate's major
+    # version; an `unknown` one only asks for review, so it must not.
+    #
+    # The dependency change has already produced a `Migrated to ...` line above,
+    # and one change must not yield two bullets: a changelog entry is per change
+    # and written for the user adapting to it, so a second bullet naming the same
+    # dependency is noise the curator has to merge by hand. Fold the note into
+    # that line where it exists, and fall back to a bullet only when it does not.
     declare -A pubdep_md=()
     for i in "${!crate_names[@]}"; do
         [ -n "${crate_pubdep_lines[$i]}" ] || continue
+        cr=${crate_names[$i]}
         while IFS=$'\t' read -r dep old new; do
             [ -z "$dep" ] && continue
             # Only a proven-incompatible bump may assert a break. An "unknown"
             # requirement change is a review item, not a major-version trigger.
             case $(classify_bump "$old" "$new") in
-            major)
-                bullet="- Public dependency \`${dep}\` upgraded to \`${new}\`; its types appear in this crate's public API, so downstream users must upgrade \`${dep}\` in lockstep."
-                ;;
-            *)
-                bullet="- Public dependency \`${dep}\` requirement changed to \`${new}\`; its types appear in this crate's public API, so check whether downstream users are affected."
-                ;;
+            major) note="its types appear in this crate's public API, so downstream users must upgrade \`${dep}\` in lockstep." ;;
+            *) note="its types appear in this crate's public API, so check whether downstream users are affected." ;;
             esac
-            pubdep_md["${crate_names[$i]}"]+="${bullet}"$'\n'
+            migrated="- Migrated to \`${dep} ${new}\`."
+            if [ -n "${dep_changed_md[$cr]:-}" ] && [ "${dep_changed_md[$cr]#*"$migrated"}" != "${dep_changed_md[$cr]}" ]; then
+                dep_changed_md[$cr]=${dep_changed_md[$cr]/"$migrated"/"- Migrated to \`${dep} ${new}\`; ${note}"}
+            else
+                pubdep_md[$cr]+="- Public dependency \`${dep}\` changed to \`${new}\`; ${note}"$'\n'
+            fi
         done <<<"${crate_pubdep_lines[$i]}"
     done
 
@@ -2907,16 +2931,20 @@ if [ "$doc_changed_total" -gt 0 ]; then
         echo "    ${YELLOW}~ ${path}${RESET}${DIM} (doc text changed)${RESET}"
     done
 fi
-if [ "$pubdep_break_total" -gt 0 ]; then
+if [ $((pubdep_break_total + pubdep_review_total)) -gt 0 ]; then
     echo ""
-    echo "${BOLD}Public-dependency breaks (${pubdep_break_total})${RESET}${DIM} — public API exposes a major-bumped dependency; cargo-public-api can't see these${RESET}"
+    echo "${BOLD}Public-dependency changes (${pubdep_break_total} breaking, ${pubdep_review_total} to review)${RESET}${DIM} — public API exposes a changed dependency; cargo-public-api can't see these${RESET}"
     for i in "${!crate_names[@]}"; do
         [ -n "${crate_pubdep_lines[$i]}" ] || continue
         echo ""
         echo "  ${BOLD}${crate_names[$i]}${RESET}"
         while IFS=$'\t' read -r dep old new; do
             [ -z "$dep" ] && continue
-            echo "    ${RED}${dep}${RESET}${DIM}: ${RESET}${RED}${old}${RESET} ${DIM}->${RESET} ${GREEN}${new}${RESET}${DIM} (major; reachable in public API)${RESET}"
+            if [ "$(classify_bump "$old" "$new")" = major ]; then
+                echo "    ${RED}${dep}${RESET}${DIM}: ${RESET}${RED}${old}${RESET} ${DIM}->${RESET} ${GREEN}${new}${RESET}${DIM} (incompatible; reachable in public API)${RESET}"
+            else
+                echo "    ${YELLOW}${dep}${RESET}${DIM}: ${RESET}${YELLOW}${old}${RESET} ${DIM}->${RESET} ${GREEN}${new}${RESET}${DIM} (compatibility unclear; reachable in public API)${RESET}"
+            fi
         done <<<"${crate_pubdep_lines[$i]}"
     done
 fi
@@ -2987,12 +3015,16 @@ if $json_mode; then
         [ -n "${crate_pubdep_lines[$i]}" ] || continue
         while IFS=$'\t' read -r dep old new; do
             [ -z "$dep" ] && continue
-            pubdep_rows+="${crate_names[$i]}"$'\t'"${dep}"$'\t'"${old}"$'\t'"${new}"$'\n'
+            case $(classify_bump "$old" "$new") in
+            major) pd_class=breaking ;;
+            *) pd_class=review ;;
+            esac
+            pubdep_rows+="${crate_names[$i]}"$'\t'"${dep}"$'\t'"${old}"$'\t'"${new}"$'\t'"${pd_class}"$'\n'
         done <<<"${crate_pubdep_lines[$i]}"
     done
     pubdep_json=$(printf '%s' "$pubdep_rows" | jq -R -s '
         split("\n") | map(select(length > 0) | split("\t")
-            | {crate: .[0], dep: .[1], old: .[2], new: .[3]})')
+            | {crate: .[0], dep: .[1], old: .[2], new: .[3], class: .[4]})')
 
     jq -n \
         --arg baseline "$baseline_label" \
