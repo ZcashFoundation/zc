@@ -87,6 +87,10 @@
 #                    dependency changes are folded in too: internal workspace
 #                    bumps and external `Migrated to ...` lines under Changed,
 #                    dropped deps under Removed. Other output is suppressed.
+#                    The draft still needs curation: see librustzcash's
+#                    CONTRIBUTING.md "Changelog Entries" for what requires an
+#                    entry and how it is worded, and skills/zc/ for the
+#                    curation workflow.
 #   --json           Emit machine-readable JSON on stdout.
 #                    Progress and diagnostics go to stderr. Schema:
 #                      {
