@@ -1,0 +1,93 @@
+name: zc Rust API check
+description: Check a Rust workspace for breaking public API and dependency changes
+author: Zcash Foundation
+
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  baseline:
+    description: Git ref used as the comparison baseline
+    required: true
+  head:
+    description: Optional exact head ref; omit it to compare the baseline branch point with HEAD
+    required: false
+    default: ""
+  working-directory:
+    description: Directory containing the Rust workspace
+    required: false
+    default: .
+  with-lock:
+    description: Include transitive Cargo.lock changes
+    required: false
+    default: "false"
+  with-values:
+    description: Include public const, static value, and documentation changes
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Check system dependencies
+      shell: bash
+      run: |
+        if ! command -v jq >/dev/null 2>&1; then
+          echo "::error title=Missing zc dependency::Install jq on the runner before using this action."
+          exit 64
+        fi
+
+    - name: Install the Rust nightly used by zc
+      shell: bash
+      env:
+        ZC_TOOLCHAIN: nightly-2026-07-18
+      run: rustup toolchain install "$ZC_TOOLCHAIN" --profile minimal --no-self-update
+
+    - name: Install cargo-public-api
+      uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+      with:
+        tool: cargo-public-api@0.52.0
+        checksum: true
+      env:
+        RUSTUP_TOOLCHAIN: nightly-2026-07-18
+
+    - name: Check the public API and dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_HEAD: ${{ inputs.head }}
+        INPUT_WITH_LOCK: ${{ inputs.with-lock }}
+        INPUT_WITH_VALUES: ${{ inputs.with-values }}
+        RUSTUP_TOOLCHAIN: nightly-2026-07-18
+        ZC_TOOLCHAIN: nightly-2026-07-18
+      run: |
+        set -euo pipefail
+
+        arguments=()
+
+        case "$INPUT_WITH_LOCK" in
+          true) arguments+=(--with-lock) ;;
+          false) ;;
+          *)
+            echo "::error title=Invalid with-lock input::Expected true or false."
+            exit 64
+            ;;
+        esac
+
+        case "$INPUT_WITH_VALUES" in
+          true) arguments+=(--with-values) ;;
+          false) ;;
+          *)
+            echo "::error title=Invalid with-values input::Expected true or false."
+            exit 64
+            ;;
+        esac
+
+        arguments+=("$INPUT_BASELINE")
+        if [[ -n "$INPUT_HEAD" ]]; then
+          arguments+=("$INPUT_HEAD")
+        fi
+
+        "$GITHUB_ACTION_PATH/zc" "${arguments[@]}"

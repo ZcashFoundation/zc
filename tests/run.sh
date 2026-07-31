@@ -693,19 +693,14 @@ else
 fi
 rm -rf "$repo"
 
-# 11) --version prints the version and commit, and honors ZC_NO_UPDATE_CHECK.
+# 11) --version prints the release version without requiring analysis tools.
 ver=$(grep -m1 '^ZC_VERSION=' "$ZC" | cut -d= -f2)
-out=$( ZC_NO_UPDATE_CHECK=1 "$ZC" --version 2>&1 ); rc=$?
+out=$("$ZC" --version 2>&1); rc=$?
 assert_eq "$rc" 0 "--version: exit 0"
-assert_contains "$out" "zc $ver" "--version: prints 'zc <ZC_VERSION>'"
-assert_contains "$out" "commit:" "--version: prints a commit line"
-case "$out" in
-    *update:*) bad "--version: ZC_NO_UPDATE_CHECK should suppress the update line" ;;
-    *) ok "--version: ZC_NO_UPDATE_CHECK suppresses the update line" ;;
-esac
-out=$( ZC_NO_UPDATE_CHECK=1 "$ZC" -V 2>&1 ); rc=$?
+assert_eq "$out" "zc $ver" "--version: prints 'zc <ZC_VERSION>'"
+out=$("$ZC" -V 2>&1); rc=$?
 assert_eq "$rc" 0 "-V alias: exit 0"
-assert_contains "$out" "zc $ver" "-V alias: prints the version line"
+assert_eq "$out" "zc $ver" "-V alias: prints the version line"
 
 # 12) Public-dependency semver join: a foreign type re-exposed in a crate's
 #     public API whose crate takes a major bump is flagged, attributed to that
@@ -735,7 +730,8 @@ new_pubdep_repo() { # $1=foo dependency line  $2=foo/src/lib.rs  -> repo dir
 }
 bump_pubdep_head() { # $1=repo  $2=new foo dependency line  -> head sha
     local d=$1 dep_line=$2
-    sed -i 's/^version = "0.1.0"/version = "0.2.0"/' "$d/bar/Cargo.toml"
+    sed -i.bak 's/^version = "0.1.0"/version = "0.2.0"/' "$d/bar/Cargo.toml"
+    rm "$d/bar/Cargo.toml.bak"
     printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n%s\n' "$dep_line" >"$d/foo/Cargo.toml"
     ( cd "$d" && cargo generate-lockfile -q ) >/dev/null 2>&1
     git -C "$d" add -A

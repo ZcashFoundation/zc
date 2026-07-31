@@ -13,7 +13,9 @@ jobs:
     name: shellcheck + syntax
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       # shellcheck is preinstalled on ubuntu-latest runners.
       - name: shellcheck
         run: shellcheck -S warning zc tests/run.sh
@@ -25,17 +27,33 @@ jobs:
   test:
     name: integration tests
     runs-on: ubuntu-latest
+    env:
+      ZC_TOOLCHAIN: nightly-2026-07-18
     steps:
-      - uses: actions/checkout@v4
-      # cargo-public-api builds rustdoc JSON, which needs a nightly toolchain.
-      - name: Install Rust (stable + nightly)
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Create an action fixture
+        id: fixture
         run: |
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup toolchain install nightly --profile minimal --no-self-update
-          rustup default stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-public-api
-        run: cargo install cargo-public-api --locked
-      # jq is preinstalled on ubuntu-latest runners.
+          mkdir -p action-fixture/src
+          cd action-fixture
+          printf '[package]\nname = "zc_action_fixture"\nversion = "0.1.0"\nedition = "2021"\n' > Cargo.toml
+          printf 'version = 4\n\n[[package]]\nname = "zc_action_fixture"\nversion = "0.1.0"\n' > Cargo.lock
+          git init
+          git config user.name "zc CI"
+          git config user.email "zc-ci@users.noreply.github.com"
+          printf 'pub fn existing() {}\n' > src/lib.rs
+          git add .
+          git commit -m "fixture baseline"
+          echo "baseline=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          printf 'pub fn existing() {}\npub fn added() {}\n' > src/lib.rs
+          git add src/lib.rs
+          git commit -m "fixture head"
+      - name: Run the local action
+        uses: ./
+        with:
+          baseline: ${{ steps.fixture.outputs.baseline }}
+          working-directory: action-fixture
       - name: Run integration tests
         run: tests/run.sh

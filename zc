@@ -26,7 +26,7 @@
 #      "no change". This section catches those via rustdoc JSON.
 #
 # PREREQUISITES
-#   cargo install cargo-public-api
+#   cargo install cargo-public-api --version 0.52.0 --locked
 #   jq
 #   a nightly toolchain (builds rustdoc JSON)
 #
@@ -59,9 +59,7 @@
 #
 # OPTIONS
 #   -h, --help       Print this help message and exit.
-#   -V, --version    Print the version, the commit this script sits at, and a
-#                    best-effort check of whether it is current with origin/main,
-#                    then exit. Set ZC_NO_UPDATE_CHECK to skip the remote check.
+#   -V, --version    Print the installed version and exit.
 #   --with-lock      Also diff Cargo.lock for transitive dep changes.
 #   --by-type        By default, per-crate API items are grouped into a
 #                    module > type > member hierarchy: a module header, then a
@@ -228,7 +226,7 @@ set -euo pipefail
 # it whenever the dep-dump / metadata logic changes so piped runs don't reuse a
 # stale cache. When run from a real file, the file's content hash is used
 # instead (see SCRIPT_HASH below), so this only matters for piped execution.
-ZC_VERSION=0.2.0
+ZC_VERSION=0.3.0
 
 # ── tunables ──────────────────────────────────────────────────────────
 # Regex (jq-syntax) matching crate names whose deps should be excluded
@@ -315,92 +313,14 @@ Usage: zc [options] [<baseline> [<head>]]
 Options: --with-lock  --with-values  --by-type  --flat  --changelog  --json  -V/--version  -h/--help
 
 Piped execution shows only this short help. For the full reference, grab a copy:
-  curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/main/zc -o zc
+  curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/v0.3.0/zc -o zc
   chmod +x zc && ./zc --help
 EOF
 }
 
-# ── version / update check (--version) ─────────────────────────────────
-# Run a command under a wall-clock timeout when `timeout`/`gtimeout` exists;
-# otherwise run it directly (git's own connect timeouts still bound it).
-run_with_timeout() { # $1=seconds  $2..=command
-    local secs=$1; shift
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$secs" "$@"
-    elif command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "$secs" "$@"
-    else
-        "$@"
-    fi
-}
-
-# Best-effort freshness check against the checkout's `origin` (or the canonical
-# repo when run standalone). Reads the remote's `main` head without fetching,
-# never blocks more than a few seconds, and degrades to a diagnostic line when
-# offline. Skipped entirely when ZC_NO_UPDATE_CHECK is set.
-version_update_check() { # $1=repo dir ("" when not a checkout)
-    [ -n "${ZC_NO_UPDATE_CHECK:-}" ] && return 0
-    local dir=$1 in_tree=false url remote short
-    [ -n "$dir" ] && git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 && in_tree=true
-
-    if $in_tree; then
-        url=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
-    fi
-    [ -n "${url:-}" ] || url="https://github.com/ZcashFoundation/zc.git"
-
-    remote=$(run_with_timeout 8 \
-        git -c core.sshCommand='ssh -o ConnectTimeout=5 -o BatchMode=yes' \
-        ls-remote "$url" refs/heads/main 2>/dev/null |
-        awk 'NR==1 {print $1}') || remote=""
-    if [ -z "$remote" ]; then
-        printf 'update: %scould not reach %s (offline?)%s\n' "$DIM" "$url" "$RESET"
-        return 0
-    fi
-    short=${remote:0:12}
-
-    if $in_tree && git -C "$dir" cat-file -e "${remote}^{commit}" 2>/dev/null; then
-        if git -C "$dir" merge-base --is-ancestor "$remote" HEAD 2>/dev/null; then
-            printf 'update: %sup to date%s with origin/main (%s)\n' "$GREEN" "$RESET" "$short"
-        else
-            printf 'update: %sbehind%s origin/main (%s) — run: git -C %s pull\n' "$YELLOW" "$RESET" "$short" "$dir"
-        fi
-    elif $in_tree; then
-        printf 'update: %sbehind%s origin/main (%s) — run: git -C %s fetch && git -C %s pull\n' \
-            "$YELLOW" "$RESET" "$short" "$dir" "$dir"
-    else
-        printf 'update: latest origin/main is %s\n' "$short"
-    fi
-}
-
-# `--version` output: the static version, the commit this script sits at (when
-# run from a git checkout), and the update check above. Runs before any tool
-# prereq check, so it works without cargo-public-api / nightly / jq installed.
+# `--version` runs before any tool prerequisite check.
 show_version() {
     printf 'zc %s\n' "$ZC_VERSION"
-
-    local path dir="" commit cdate dirty=""
-    path=$0
-    command -v readlink >/dev/null 2>&1 && path=$(readlink -f "$0" 2>/dev/null || echo "$0")
-    if [ -f "$path" ]; then
-        dir=$(dirname "$path")
-        if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            commit=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo unknown)
-            cdate=$(git -C "$dir" show -s --format=%cs HEAD 2>/dev/null || echo "")
-            git -C "$dir" diff --quiet HEAD -- "$path" 2>/dev/null || dirty=" ${YELLOW}(modified)${RESET}"
-            if [ -n "$cdate" ]; then
-                printf 'commit: %s (%s)%s\n' "$commit" "$cdate" "$dirty"
-            else
-                printf 'commit: %s%s\n' "$commit" "$dirty"
-            fi
-            printf 'source: %s\n' "$path"
-        else
-            printf 'commit: unknown (source not in a git checkout)\n'
-        fi
-    else
-        printf 'commit: unknown (piped execution; no source file)\n'
-    fi
-
-    version_update_check "$dir"
 }
 
 with_lock=false
@@ -1650,8 +1570,9 @@ compute_pubdep_breaks() { # $1=crate
     # care about, so we need the whole surface, not the diff). List mode builds
     # from the head worktree, reusing the already-populated target dir so this is
     # a rustdoc-only pass, and only runs for crates with a major external bump.
-    api_text=$(CARGO_TARGET_DIR="$api_head_target" cargo public-api "${feature_args[@]}" \
-        --manifest-path "$api_head_worktree/Cargo.toml" -p "$crate" -ss 2>/dev/null || true)
+    api_text=$(CARGO_TARGET_DIR="$api_head_target" cargo +"$nightly_toolchain" public-api \
+        "${feature_args[@]}" --manifest-path "$api_head_worktree/Cargo.toml" \
+        -p "$crate" -ss 2>/dev/null || true)
     [ -n "$api_text" ] || return 0
     for dep in "${majors[@]}"; do
         local pkg=${pubdep_pkg["$crate|$dep"]:-$dep}
