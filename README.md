@@ -194,6 +194,13 @@ It's a *draft* — review and curate before committing. Needs a `nightly`
 toolchain for the trait attribution (without one it falls back to plain
 type grouping).
 
+The curation rules are librustzcash's
+[Changelog Entries](https://github.com/zcash/librustzcash/blob/main/CONTRIBUTING.md#changelog-entries)
+guidance, which zc tracks: what needs an entry (including bug fixes and semantic
+changes zc's signature diff cannot see), that an entry describes the change since the
+crate's last release rather than since zc's baseline, and that it belongs in the commit
+that makes the change. The [`skills/zc/`](#claude-code-skill) skill encodes them.
+
 ### Baseline: the branch point, not the tip
 
 When you compare against a parent branch — the default, or a single explicit
