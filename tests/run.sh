@@ -447,6 +447,60 @@ assert_contains "$out" "- \`dep\` dependency bumped to \`0.2.0\`." "--changelog:
 assert_contains "$out" "- \`dep2\` dependency." "--changelog: dropped dep under Removed"
 rm -rf "$ws"
 
+# 6i2) --changelog documents an *external* dependency requirement change as a
+#      "Migrated to" line under ### Changed. Branch coverage for that line, which
+#      zc emits for every external requirement change whether or not the
+#      dependency is reachable in the public API; test 12 covers the reachable
+#      case, where the break is folded into this same line. `ext_dep` is
+#      `exclude`d from the workspace so it resolves offline via a path while
+#      still counting as external (scope "ext", not "int").
+ws=$(mktemp -d)
+mkdir -p "$ws/ext_dep/src" "$ws/zc_fixture/src"
+printf '/target\n' >"$ws/.gitignore"
+cat >"$ws/Cargo.toml" <<'EOF'
+[workspace]
+members = ["zc_fixture"]
+exclude = ["ext_dep"]
+resolver = "2"
+EOF
+printf '[package]\nname = "ext_dep"\nversion = "0.29.0"\nedition = "2021"\n' >"$ws/ext_dep/Cargo.toml"
+echo 'pub struct Foo;' >"$ws/ext_dep/src/lib.rs"
+cat >"$ws/zc_fixture/Cargo.toml" <<'EOF'
+[package]
+name = "zc_fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ext_dep = { path = "../ext_dep", version = "0.29.0" }
+EOF
+echo 'pub fn placeholder() {}' >"$ws/zc_fixture/src/lib.rs"
+git -C "$ws" init -q
+git -C "$ws" config user.email t@t
+git -C "$ws" config user.name t
+git -C "$ws" config commit.gpgsign false
+( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
+git -C "$ws" add -A
+git -C "$ws" commit -qm base
+base=$(git -C "$ws" rev-parse HEAD)
+printf '[package]\nname = "ext_dep"\nversion = "0.30.0"\nedition = "2021"\n' >"$ws/ext_dep/Cargo.toml"
+cat >"$ws/zc_fixture/Cargo.toml" <<'EOF'
+[package]
+name = "zc_fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ext_dep = { path = "../ext_dep", version = "0.30.0" }
+EOF
+( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
+git -C "$ws" add -A
+git -C "$ws" commit -qm head
+head=$(git -C "$ws" rev-parse HEAD)
+out=$( cd "$ws" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+assert_contains "$out" "- Migrated to \`ext_dep 0.30.0\`." "--changelog: external dep bump under Changed"
+rm -rf "$ws"
+
 # 6j) An *added* trait impl's associated item is grouped under its `impl Trait
 #     for Self` header (the trait recovered from rustdoc, the Self generics from
 #     the signature) rather than under a bare `Foo` type.
@@ -752,7 +806,11 @@ else
 fi
 out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
 assert_contains "$out" "## foo" "public-dep --changelog: foo section present"
-assert_contains "$out" 'Public dependency `bar`' "public-dep --changelog: names the breaking dep"
+assert_contains "$out" "- Migrated to \`bar 0.2\`; its types appear in this crate's public API, so downstream users must upgrade \`bar\` in lockstep." "public-dep --changelog: break folded into the single Migrated entry"
+case "$out" in
+*'Public dependency'*) bad "public-dep --changelog: break must not add a second bullet beside Migrated to" ;;
+*) ok "public-dep --changelog: one bullet per dependency change" ;;
+esac
 rm -rf "$repo"
 
 # 12b) Negative: same bump, but the foreign type is used only in a private fn.

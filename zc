@@ -2742,25 +2742,36 @@ if $changelog_mode; then
         ' <(printf '%s\n' "$pc_base") <(printf '%s\n' "$pc_head"))
     fi
 
-    # Public-dependency semver breaks per crate: a `### Changed` prose note so the
-    # curator bumps the crate to a major version. Without it the draft shows
-    # nothing for a crate whose only break is a re-exposed major-bumped dep.
+    # Public-dependency requirement changes per crate: a `### Changed` prose note
+    # for each dependency that changed and whose types are reachable in the crate's
+    # public API. Without it the draft shows nothing for a crate whose only change
+    # is a re-exposed dependency, since the signature text is identical. A `major`
+    # change is a proven break and says the curator must bump the crate's major
+    # version; an `unknown` one only asks for review, so it must not.
+    #
+    # The dependency change has already produced a `Migrated to ...` line above,
+    # and one change must not yield two bullets: a changelog entry is per change
+    # and written for the user adapting to it, so a second bullet naming the same
+    # dependency is noise the curator has to merge by hand. Fold the note into
+    # that line where it exists, and fall back to a bullet only when it does not.
     declare -A pubdep_md=()
     for i in "${!crate_names[@]}"; do
         [ -n "${crate_pubdep_lines[$i]}" ] || continue
+        cr=${crate_names[$i]}
         while IFS=$'\t' read -r dep old new; do
             [ -z "$dep" ] && continue
             # Only a proven-incompatible bump may assert a break. An "unknown"
             # requirement change is a review item, not a major-version trigger.
             case $(classify_bump "$old" "$new") in
-            major)
-                bullet="- Public dependency \`${dep}\` upgraded to \`${new}\`; its types appear in this crate's public API, so downstream users must upgrade \`${dep}\` in lockstep."
-                ;;
-            *)
-                bullet="- Public dependency \`${dep}\` requirement changed to \`${new}\`; its types appear in this crate's public API, so check whether downstream users are affected."
-                ;;
+            major) note="its types appear in this crate's public API, so downstream users must upgrade \`${dep}\` in lockstep." ;;
+            *) note="its types appear in this crate's public API, so check whether downstream users are affected." ;;
             esac
-            pubdep_md["${crate_names[$i]}"]+="${bullet}"$'\n'
+            migrated="- Migrated to \`${dep} ${new}\`."
+            if [ -n "${dep_changed_md[$cr]:-}" ] && [ "${dep_changed_md[$cr]#*"$migrated"}" != "${dep_changed_md[$cr]}" ]; then
+                dep_changed_md[$cr]=${dep_changed_md[$cr]/"$migrated"/"- Migrated to \`${dep} ${new}\`; ${note}"}
+            else
+                pubdep_md[$cr]+="- Public dependency \`${dep}\` changed to \`${new}\`; ${note}"$'\n'
+            fi
         done <<<"${crate_pubdep_lines[$i]}"
     done
 
