@@ -13,7 +13,7 @@ description: >-
 Run `zc --changelog`, curate its draft into
 [librustzcash](https://github.com/zcash/librustzcash)-style entries, and
 **write them into the repo's `CHANGELOG.md` files**. Needs `zc` on `PATH` (plus
-its prereqs: `cargo-public-api`, `jq`, a nightly toolchain).
+its prereqs: `cargo-public-api`, a nightly toolchain).
 
 ## Quick start
 

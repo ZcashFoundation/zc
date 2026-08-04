@@ -6,20 +6,31 @@
 # exit code. We assert *behavior* (verdict / exit code / a key item name), not
 # exact `cargo public-api` output — that text shifts with the rustc version.
 #
-# Requires the same tools zc does: cargo-public-api, jq, cargo, a Rust
-# toolchain (with a nightly available, which cargo-public-api uses for rustdoc
-# JSON). Run from anywhere:  tests/run.sh
+# Requires the same tools zc does: cargo-public-api, cargo, a Rust toolchain (with a
+# nightly available, which cargo-public-api uses for rustdoc JSON), plus jq for the
+# harness's own JSON assertions. Run from anywhere:
+# `cargo build --release && tests/run.sh`, or point ZC at another build.
 set -uo pipefail
 
-ZC=${ZC:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/zc"}
+ZC=${ZC:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/release/zc"}
+if [ ! -x "$ZC" ]; then
+    echo "error: no zc binary at $ZC (run: cargo build --release)" >&2
+    exit 64
+fi
 pass=0
 fail=0
 
-ok()  { printf '  \033[32mok\033[0m   %s\n' "$1"; pass=$((pass + 1)); }
-bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail + 1)); }
+ok() {
+    printf '  \033[32mok\033[0m   %s\n' "$1"
+    pass=$((pass + 1))
+}
+bad() {
+    printf '  \033[31mFAIL\033[0m %s\n' "$1"
+    fail=$((fail + 1))
+}
 
-assert_eq()       { if [ "$1" = "$2" ]; then ok "$3"; else bad "$3 (got '$1', want '$2')"; fi; }
-assert_contains() { case "$1" in *"$2"*) ok "$3" ;; *) bad "$3 (output missing: $2)" ;; esac; }
+assert_eq() { if [ "$1" = "$2" ]; then ok "$3"; else bad "$3 (got '$1', want '$2')"; fi; }
+assert_contains() { case "$1" in *"$2"*) ok "$3" ;; *) bad "$3 (output missing: $2)" ;; esac }
 
 api_cache_file() { # $1=repo  $2=sha  $3=crate
     local repo=$1 sha=$2 crate=$3
@@ -37,7 +48,10 @@ api_cache_file() { # $1=repo  $2=sha  $3=crate
 api_cache_count_for_sha() { # $1=repo  $2=sha
     local repo=$1 sha=$2
     local cache_dir=$repo/target/zc-cache
-    [ -d "$cache_dir" ] || { printf '0'; return; }
+    [ -d "$cache_dir" ] || {
+        printf '0'
+        return
+    }
     find "$cache_dir" -maxdepth 1 -type f -name "${sha}.*.api.json" | wc -l | tr -d ' '
 }
 
@@ -77,7 +91,7 @@ edition = "2021"
 EOF
     mkdir -p "$d/src"
     printf '%s\n' "$1" >"$d/src/lib.rs"
-    ( cd "$d" && cargo generate-lockfile -q ) >/dev/null 2>&1
+    (cd "$d" && cargo generate-lockfile -q) >/dev/null 2>&1
     git -C "$d" add -A
     git -C "$d" commit -qm base
     printf '%s' "$d"
@@ -101,7 +115,8 @@ before_head=$(git -C "$repo" rev-parse HEAD)
 before_status=$(git -C "$repo" status --porcelain)
 before_branch=$(git -C "$repo" branch --show-current)
 before_worktrees=$(worktree_count "$repo")
-out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
+out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
+rc=$?
 assert_eq "$rc" 1 "removed pub fn: exit 1"
 assert_contains "$out" "BREAKING" "removed pub fn: BREAKING verdict"
 assert_contains "$out" "foo" "removed pub fn: names the removed item"
@@ -112,13 +127,15 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn foo() {}\npub fn added() {}' 'add fn')
-out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
+out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
+rc=$?
 assert_eq "$rc" 0 "additive only: exit 0"
 assert_contains "$out" "OK" "additive only: OK verdict"
 
 # 3) Changing only a private item is no public-API change.
 head2=$(commit_lib "$repo" $'pub fn foo() {}\npub fn added() {}\nfn helper() {}' 'add private fn')
-out=$( cd "$repo" && "$ZC" "$head" "$head2" 2>&1 ); rc=$?
+out=$(cd "$repo" && "$ZC" "$head" "$head2" 2>&1)
+rc=$?
 assert_eq "$rc" 0 "private-only change: exit 0"
 assert_contains "$out" "No public API changes" "private-only change: reported as no change"
 rm -rf "$repo"
@@ -127,7 +144,8 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap')
-json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null ); rc=$?
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
+rc=$?
 assert_eq "$rc" 1 "--json: breaking changes exit 1"
 if printf '%s' "$json" | jq -e 'has("totals") and has("crates") and .verdict == "breaking"' >/dev/null 2>&1; then
     ok "--json: valid shape, verdict=breaking"
@@ -144,7 +162,8 @@ before_head=$(git -C "$repo" rev-parse HEAD)
 before_status=$(git -C "$repo" status --porcelain)
 before_branch=$(git -C "$repo" branch --show-current)
 before_worktrees=$(worktree_count "$repo")
-json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null ); rc=$?
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
+rc=$?
 assert_eq "$rc" 2 "--json: analysis error exits 2"
 if printf '%s' "$json" | jq -e '
     .verdict == "error" and
@@ -163,7 +182,8 @@ before_head=$(git -C "$repo" rev-parse HEAD)
 before_status=$(git -C "$repo" status --porcelain)
 before_branch=$(git -C "$repo" branch --show-current)
 before_worktrees=$(worktree_count "$repo")
-out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
+out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
+rc=$?
 assert_eq "$rc" 2 "human error: analysis error exits 2"
 assert_contains "$out" "stage: head_build" "human error: shows failing stage"
 assert_contains "$out" "zc fixture build failure" "human error: shows stderr tail"
@@ -174,7 +194,8 @@ before_branch=$(git -C "$repo" branch --show-current)
 before_worktrees=$(worktree_count "$repo")
 changelog_stdout_file=$(mktemp)
 changelog_stderr_file=$(mktemp)
-( cd "$repo" && "$ZC" --changelog "$base" "$head" >"$changelog_stdout_file" 2>"$changelog_stderr_file" ); rc=$?
+(cd "$repo" && "$ZC" --changelog "$base" "$head" >"$changelog_stdout_file" 2>"$changelog_stderr_file")
+rc=$?
 changelog_stdout=$(cat "$changelog_stdout_file")
 changelog_stderr=$(cat "$changelog_stderr_file")
 rm -f "$changelog_stdout_file" "$changelog_stderr_file"
@@ -186,7 +207,8 @@ assert_repo_unchanged "$repo" "$before_head" "$before_status" "$before_branch" "
 rm -rf "$repo"
 
 # 4c) Usage errors use a distinct code.
-out=$( "$ZC" --definitely-not-a-zc-option 2>&1 ); rc=$?
+out=$("$ZC" --definitely-not-a-zc-option 2>&1)
+rc=$?
 assert_eq "$rc" 64 "usage error: exit 64"
 assert_contains "$out" "unknown option" "usage error: explains the option failure"
 
@@ -202,11 +224,12 @@ commit_lib "$repo" $'pub fn foo() {}\npub fn feature_fn() {}' 'feature work' >/d
 git -C "$repo" checkout -q main
 commit_lib "$repo" $'pub fn foo() {}\npub fn upstream_fn() {}' 'upstream work after branch' >/dev/null
 git -C "$repo" checkout -q feature
-out=$( cd "$repo" && "$ZC" 2>&1 ); rc=$?
+out=$(cd "$repo" && "$ZC" 2>&1)
+rc=$?
 assert_contains "$out" "feature_fn" "merge-base default: shows the branch's own addition"
 case "$out" in
-    *upstream_fn*) bad "merge-base default: leaked the parent's post-branch change (upstream_fn)" ;;
-    *) ok "merge-base default: excludes the parent's post-branch change" ;;
+*upstream_fn*) bad "merge-base default: leaked the parent's post-branch change (upstream_fn)" ;;
+*) ok "merge-base default: excludes the parent's post-branch change" ;;
 esac
 # And the header should announce the merge-base baseline, not a branch tip.
 assert_contains "$out" "merge-base(main, HEAD)" "merge-base default: labels the baseline"
@@ -228,7 +251,8 @@ git -C "$repo" remote add origin "$repo"
 git -C "$repo" update-ref refs/remotes/origin/feature "$(git -C "$repo" rev-parse feature)"
 git -C "$repo" config branch.feature.remote origin
 git -C "$repo" config branch.feature.merge refs/heads/feature
-out=$( cd "$repo" && "$ZC" 2>&1 ); rc=$?
+out=$(cd "$repo" && "$ZC" 2>&1)
+rc=$?
 assert_contains "$out" "merge-base(main, HEAD)" "self-upstream: baseline falls through to main"
 assert_contains "$out" "feature_fn" "self-upstream: still shows the branch's own addition"
 rm -rf "$repo"
@@ -239,7 +263,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub enum Color { Red, Green, Blue }' 'add Color enum')
-out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 )
+out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
 if printf '%s\n' "$out" | grep -qE '^ +zc_fixture$'; then
     ok "default: bare module header (no tag)"
 else
@@ -258,7 +282,7 @@ else
 fi
 
 # 6b) --by-type uses a flat type header (tagged); members keep the type prefix.
-byt=$( cd "$repo" && "$ZC" --by-type "$base" "$head" 2>&1 )
+byt=$(cd "$repo" && "$ZC" --by-type "$base" "$head" 2>&1)
 if printf '%s\n' "$byt" | grep -qE '^ +zc_fixture::Color +\(enum\)$'; then
     ok "--by-type: flat type header with (enum) tag"
 else
@@ -267,7 +291,7 @@ fi
 assert_contains "$byt" "+ pub Color::Red" "--by-type: members keep the type prefix"
 
 # 6c) --flat keeps fully-qualified paths and emits no indented group header.
-flat=$( cd "$repo" && "$ZC" --flat "$base" "$head" 2>&1 )
+flat=$(cd "$repo" && "$ZC" --flat "$base" "$head" 2>&1)
 assert_contains "$flat" "pub zc_fixture::Color::Red" "--flat: keeps fully-qualified paths"
 if printf '%s\n' "$flat" | grep -qE '^ +(zc_fixture|Color)(::[A-Za-z0-9_]+)*( +\([a-z]+\))?$'; then
     bad "--flat: should not emit a group header"
@@ -282,7 +306,7 @@ rm -rf "$repo"
 repo=$(new_repo $'pub trait Speak { fn hello(&self); }')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub trait Speak { fn hello(&self); fn bye(&self); }' 'add trait method bye')
-out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 )
+out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
 if printf '%s\n' "$out" | grep -qE '^ +Speak +\(trait\)$'; then
     ok "default: pre-existing type kind read from head source (trait)"
 else
@@ -296,7 +320,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub enum E { A { x: u32 }, B { y: u32 } }' 'add enum with struct-variants')
-out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 )
+out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
 nhdr=$(printf '%s\n' "$out" | grep -cE '^ +E +\(enum\)$')
 assert_eq "$nhdr" "1" "clustering: enum header appears exactly once (no duplicate)"
 rm -rf "$repo"
@@ -306,7 +330,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Wrap<T>(pub T);\nimpl Wrap<u32> { pub fn get(&self) -> u32 { self.0 } }' 'add generic Wrap')
-out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 )
+out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
 assert_contains "$out" "+ pub fn get(" "generics: type prefix with generic args is factored"
 if printf '%s\n' "$out" | grep -qF 'Wrap<u32>::get'; then
     bad "generics: member should not keep the Wrap<u32>:: prefix"
@@ -346,7 +370,7 @@ git -C "$ws" init -q
 git -C "$ws" config user.email t@t
 git -C "$ws" config user.name t
 git -C "$ws" config commit.gpgsign false
-( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
+(cd "$ws" && cargo generate-lockfile -q) >/dev/null 2>&1
 git -C "$ws" add -A
 git -C "$ws" commit -qm base
 base=$(git -C "$ws" rev-parse HEAD)
@@ -354,7 +378,7 @@ printf 'pub trait Ext { fn tag(&self) -> u8; fn name(&self) -> u8; }\nimpl Ext f
 git -C "$ws" add -A
 git -C "$ws" commit -qm head
 head=$(git -C "$ws" rev-parse HEAD)
-out=$( cd "$ws" && "$ZC" "$base" "$head" 2>&1 )
+out=$(cd "$ws" && "$ZC" "$base" "$head" 2>&1)
 assert_contains "$out" "[trait impls on external types]" "external: foreign-type items get a dedicated section"
 # The foreign item is bucketed under its real crate (`dep`), not as a module of
 # the analyzed crate.
@@ -370,7 +394,7 @@ rm -rf "$ws"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Widget;\nimpl Widget { pub fn new() -> Self { Widget } pub fn run(&self) {} }' 'add Widget')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "## zc_fixture" "--changelog: per-crate heading"
 assert_contains "$out" "### Added" "--changelog: Added section"
 assert_contains "$out" "- \`Widget::{new, run}\`" "--changelog: type members brace-grouped on one line"
@@ -382,12 +406,12 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub struct Verifier;\nimpl Verifier { pub fn check_cross_address_disabled(&self) {} pub fn enforce_nullifier_uniqueness(&self) {} pub fn validate_ironwood_proof_size(&self) {} pub fn validate_orchard_value_balance(&self) {} }' 'add Verifier')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- \`Verifier\`:" "--changelog: over-wide group uses a type header"
 assert_contains "$out" "  - \`validate_ironwood_proof_size\`" "--changelog: over-wide group members indented as sub-bullets"
 case "$out" in
-    *'Verifier::{'*) bad "--changelog: over-wide group should not stay on one brace line" ;;
-    *) ok "--changelog: over-wide group is not kept inline" ;;
+*'Verifier::{'*) bad "--changelog: over-wide group should not stay on one brace line" ;;
+*) ok "--changelog: over-wide group is not kept inline" ;;
 esac
 rm -rf "$repo"
 
@@ -423,7 +447,7 @@ git -C "$ws" init -q
 git -C "$ws" config user.email t@t
 git -C "$ws" config user.name t
 git -C "$ws" config commit.gpgsign false
-( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
+(cd "$ws" && cargo generate-lockfile -q) >/dev/null 2>&1
 git -C "$ws" add -A
 git -C "$ws" commit -qm base
 base=$(git -C "$ws" rev-parse HEAD)
@@ -438,11 +462,11 @@ edition = "2021"
 [dependencies]
 dep = { path = "../dep", version = "0.2.0" }
 EOF
-( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
+(cd "$ws" && cargo generate-lockfile -q) >/dev/null 2>&1
 git -C "$ws" add -A
 git -C "$ws" commit -qm head
 head=$(git -C "$ws" rev-parse HEAD)
-out=$( cd "$ws" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$ws" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- \`dep\` dependency bumped to \`0.2.0\`." "--changelog: internal dep bump under Changed"
 assert_contains "$out" "- \`dep2\` dependency." "--changelog: dropped dep under Removed"
 rm -rf "$ws"
@@ -479,7 +503,7 @@ git -C "$ws" init -q
 git -C "$ws" config user.email t@t
 git -C "$ws" config user.name t
 git -C "$ws" config commit.gpgsign false
-( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
+(cd "$ws" && cargo generate-lockfile -q) >/dev/null 2>&1
 git -C "$ws" add -A
 git -C "$ws" commit -qm base
 base=$(git -C "$ws" rev-parse HEAD)
@@ -493,11 +517,11 @@ edition = "2021"
 [dependencies]
 ext_dep = { path = "../ext_dep", version = "0.30.0" }
 EOF
-( cd "$ws" && cargo generate-lockfile -q ) >/dev/null 2>&1
+(cd "$ws" && cargo generate-lockfile -q) >/dev/null 2>&1
 git -C "$ws" add -A
 git -C "$ws" commit -qm head
 head=$(git -C "$ws" rev-parse HEAD)
-out=$( cd "$ws" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$ws" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- Migrated to \`ext_dep 0.30.0\`." "--changelog: external dep bump under Changed"
 rm -rf "$ws"
 
@@ -507,7 +531,7 @@ rm -rf "$ws"
 repo=$(new_repo $'pub trait IntoDisk { type Bytes; }\npub struct Foo<T>(pub T);')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub trait IntoDisk { type Bytes; }\npub struct Foo<T>(pub T);\nimpl IntoDisk for Foo<u32> { type Bytes = [u8; 48]; }' 'add IntoDisk impl')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- \`impl IntoDisk for Foo<u32>\`:" "--changelog: added assoc item grouped under impl header with Self generics"
 assert_contains "$out" "- \`Bytes\`" "--changelog: assoc type shown as a bare member under the impl"
 rm -rf "$repo"
@@ -517,25 +541,31 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn f() -> u8 { 0 }')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" 'pub fn f() -> u16 { 0 }' 'widen return type')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- \`fn f() -> u8\`" "--changelog: Changed shows the old signature"
 assert_contains "$out" "→ \`fn f() -> u16\`" "--changelog: Changed shows the new signature after an arrow"
 rm -rf "$repo"
 
 # 6n) An MSRV (rust-version) bump is documented under ### Changed.
 repo=$(mktemp -d)
-git -C "$repo" init -q; git -C "$repo" config user.email t@t; git -C "$repo" config user.name t; git -C "$repo" config commit.gpgsign false
+git -C "$repo" init -q
+git -C "$repo" config user.email t@t
+git -C "$repo" config user.name t
+git -C "$repo" config commit.gpgsign false
 printf '/target\n' >"$repo/.gitignore"
 printf '[package]\nname = "zc_fixture"\nversion = "0.1.0"\nedition = "2021"\nrust-version = "1.70"\n' >"$repo/Cargo.toml"
-mkdir -p "$repo/src"; echo 'pub fn f() {}' >"$repo/src/lib.rs"
-( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
-git -C "$repo" add -A; git -C "$repo" commit -qm base
+mkdir -p "$repo/src"
+echo 'pub fn f() {}' >"$repo/src/lib.rs"
+(cd "$repo" && cargo generate-lockfile -q) >/dev/null 2>&1
+git -C "$repo" add -A
+git -C "$repo" commit -qm base
 base=$(git -C "$repo" rev-parse HEAD)
 printf '[package]\nname = "zc_fixture"\nversion = "0.1.0"\nedition = "2021"\nrust-version = "1.75"\n' >"$repo/Cargo.toml"
-( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
-git -C "$repo" add -A; git -C "$repo" commit -qm head
+(cd "$repo" && cargo generate-lockfile -q) >/dev/null 2>&1
+git -C "$repo" add -A
+git -C "$repo" commit -qm head
 head=$(git -C "$repo" rev-parse HEAD)
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- MSRV is now 1.75." "--changelog: MSRV bump documented under Changed"
 rm -rf "$repo"
 
@@ -544,7 +574,7 @@ rm -rf "$repo"
 repo=$(new_repo $'pub trait Marker {}\npub struct A;\npub struct B;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub trait Marker {}\npub struct A;\npub struct B;\nimpl Marker for A {}\nimpl Marker for B {}' 'impl Marker on A and B')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- \`impl Marker\` for:" "--changelog: a trait on multiple types is grouped by trait"
 rm -rf "$repo"
 
@@ -554,7 +584,7 @@ rm -rf "$repo"
 repo=$(new_repo $'pub trait T { fn m(&self); }\npub struct S;\nimpl T for S { fn m(&self) {} }')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub trait T { fn m(&self); }\npub struct S;' 'remove impl T for S')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- \`impl T for S\`:" "--changelog: removed impl method grouped under its impl (base map)"
 rm -rf "$repo"
 
@@ -564,7 +594,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub struct Foo;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub struct Foo;\nimpl<\'a> From<&\'a u8> for Foo { fn from(_: &\'a u8) -> Self { Foo } }' 'add lifetime-param impl')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "impl From<&u8> for Foo" "--changelog: impl<'a> recognized; lifetime stripped"
 case "$out" in
 *'::impl`'* | *'- `impl`'*) bad "--changelog: impl<'a> must not collapse to a stray 'impl' member" ;;
@@ -579,7 +609,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub struct Foo;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub struct Foo;\npub mod sub { pub struct Bar; }\nimpl From<core::option::Option<sub::Bar>> for Foo { fn from(_: core::option::Option<sub::Bar>) -> Self { Foo } }' 'add nested From')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "impl From<option::Option<sub::Bar>> for Foo" "--changelog: keep one module segment + nested generics"
 rm -rf "$repo"
 
@@ -588,7 +618,7 @@ rm -rf "$repo"
 repo=$(new_repo $'pub struct Foo;\npub struct Bar;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub struct Foo;\npub struct Bar;\nimpl From<Bar> for Foo { fn from(_: Bar) -> Self { Foo } }' 'add From<Bar>')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "impl From<Bar> for Foo" "--changelog: From impl is documented"
 case "$out" in
 *'`from`'*) bad "--changelog: a From impl must not list its boilerplate 'from' method" ;;
@@ -601,7 +631,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\n#[derive(PartialEq)]\npub struct X(pub u8);' 'derive PartialEq')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "impl PartialEq for X" "--changelog: real derived impl kept"
 case "$out" in
 *StructuralPartialEq*) bad "--changelog: StructuralPartialEq compiler marker must be dropped" ;;
@@ -615,7 +645,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub const fn answer() -> u8 { 42 }' 'add const fn')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- \`answer\`" "--changelog: const fn keeps its name"
 case "$out" in
 *'- `fn`'*) bad "--changelog: const fn must not collapse to a stray 'fn' group" ;;
@@ -628,7 +658,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\n#[derive(Hash)]\npub struct K(pub u8);' 'derive Hash')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "impl Hash for K" "--changelog: -ss surfaces auto-derived impls"
 rm -rf "$repo"
 
@@ -637,7 +667,7 @@ rm -rf "$repo"
 repo=$(new_repo 'pub struct Foo;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub struct Foo;\n#[derive(Clone, Debug)]\npub struct Bar(pub u8);' 'derive Clone, Debug on Bar')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "impl {Clone, Debug} for Bar" "--changelog: derives on one type collapse to impl {..} for T"
 rm -rf "$repo"
 
@@ -646,11 +676,11 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub fn placeholder() {}\npub fn sibling() -> u8 { 0 }\npub mod m { pub struct Foo; pub fn g() -> u8 { 0 } }' 'add module m and a sibling fn')
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- \`m\`" "--changelog: an added module is listed on its own"
 assert_contains "$out" "- \`sibling\`" "--changelog: items outside the module are unaffected"
 case "$out" in
-*Foo*|*'m::g'*) bad "--changelog: contents of an added module should be subsumed" ;;
+*Foo* | *'m::g'*) bad "--changelog: contents of an added module should be subsumed" ;;
 *) ok "--changelog: added module subsumes its contents" ;;
 esac
 rm -rf "$repo"
@@ -659,14 +689,16 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap foo -> bar')
-out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
+out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
+rc=$?
 assert_eq "$rc" 1 "api cache hit: initial diff exit 1"
 base_cache=$(api_cache_file "$repo" "$base" zc_fixture) || base_cache=""
 head_cache=$(api_cache_file "$repo" "$head" zc_fixture) || head_cache=""
 if [ -n "$base_cache" ] && [ -n "$head_cache" ]; then
     ok "api cache hit: populated both ref cache files"
     if cp "$base_cache" "$head_cache"; then
-        out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
+        out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
+        rc=$?
         assert_eq "$rc" 0 "api cache hit: tampered cache consumed"
         assert_contains "$out" "No public API changes" "api cache hit: tampered cache hides diff"
     else
@@ -687,7 +719,8 @@ fresh_cache="$cache_dir/fresh.fp.zc_fixture.api.json"
 printf '%s\n' '{}' >"$old_cache"
 printf '%s\n' '{}' >"$fresh_cache"
 touch -t 200001010000 "$old_cache"
-( cd "$repo" && "$ZC" "$base" "$base" >/dev/null 2>&1 ); rc=$?
+(cd "$repo" && "$ZC" "$base" "$base" >/dev/null 2>&1)
+rc=$?
 assert_eq "$rc" 0 "api cache gc: zc run succeeds"
 if [ ! -e "$old_cache" ]; then
     ok "api cache gc: old api json removed"
@@ -704,7 +737,8 @@ rm -rf "$repo"
 # 9) Dirty working-tree snapshots are not written to the rustdoc JSON cache.
 repo=$(new_repo 'pub fn foo() {}')
 printf '%s\n' 'pub fn bar() {}' >"$repo/src/lib.rs"
-json=$( cd "$repo" && "$ZC" --json 2>/dev/null ); rc=$?
+json=$(cd "$repo" && "$ZC" --json 2>/dev/null)
+rc=$?
 assert_eq "$rc" 1 "snapshot api cache: dirty diff exit 1"
 snapshot_short=$(printf '%s' "$json" | jq -r '.head_sha // empty')
 snapshot_sha=$(git -C "$repo" rev-parse --verify "${snapshot_short}^{commit}" 2>/dev/null || true)
@@ -720,12 +754,14 @@ rm -rf "$repo"
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap foo -> bar')
-out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
+out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
+rc=$?
 assert_eq "$rc" 1 "corrupt api cache: initial diff exit 1"
 head_cache=$(api_cache_file "$repo" "$head" zc_fixture) || head_cache=""
 if [ -n "$head_cache" ]; then
     printf '%s\n' 'not json' >"$head_cache"
-    out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
+    out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
+    rc=$?
     assert_eq "$rc" 1 "corrupt api cache: rebuild preserves verdict"
     assert_contains "$out" "BREAKING" "corrupt api cache: breaking verdict retained"
     if jq -e . "$head_cache" >/dev/null 2>&1; then
@@ -734,7 +770,8 @@ if [ -n "$head_cache" ]; then
         bad "corrupt api cache: cache was not overwritten with JSON"
     fi
     printf '%s\n' '{}' >"$head_cache"
-    out=$( cd "$repo" && "$ZC" "$base" "$head" 2>&1 ); rc=$?
+    out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
+    rc=$?
     assert_eq "$rc" 1 "empty-object api cache: rebuild preserves verdict"
     assert_contains "$out" "BREAKING" "empty-object api cache: breaking verdict retained"
     if jq -e 'has("format_version") and has("root") and has("index")' "$head_cache" >/dev/null 2>&1; then
@@ -748,11 +785,13 @@ fi
 rm -rf "$repo"
 
 # 11) --version prints the release version without requiring analysis tools.
-ver=$(grep -m1 '^ZC_VERSION=' "$ZC" | cut -d= -f2)
-out=$("$ZC" --version 2>&1); rc=$?
+ver=$(grep -m1 '^version = ' "$(dirname "${BASH_SOURCE[0]}")/../Cargo.toml" | cut -d'"' -f2)
+out=$("$ZC" --version 2>&1)
+rc=$?
 assert_eq "$rc" 0 "--version: exit 0"
 assert_eq "$out" "zc $ver" "--version: prints 'zc <ZC_VERSION>'"
-out=$("$ZC" -V 2>&1); rc=$?
+out=$("$ZC" -V 2>&1)
+rc=$?
 assert_eq "$rc" 0 "-V alias: exit 0"
 assert_eq "$out" "zc $ver" "-V alias: prints the version line"
 
@@ -777,7 +816,7 @@ new_pubdep_repo() { # $1=foo dependency line  $2=foo/src/lib.rs  -> repo dir
     printf '%s\n' "$lib" >"$d/foo/src/lib.rs"
     printf '[package]\nname = "bar"\nversion = "0.1.0"\nedition = "2021"\n' >"$d/bar/Cargo.toml"
     printf 'pub struct Error;\n' >"$d/bar/src/lib.rs"
-    ( cd "$d" && cargo generate-lockfile -q ) >/dev/null 2>&1
+    (cd "$d" && cargo generate-lockfile -q) >/dev/null 2>&1
     git -C "$d" add -A
     git -C "$d" commit -qm base
     printf '%s' "$d"
@@ -787,7 +826,7 @@ bump_pubdep_head() { # $1=repo  $2=new foo dependency line  -> head sha
     sed -i.bak 's/^version = "0.1.0"/version = "0.2.0"/' "$d/bar/Cargo.toml"
     rm "$d/bar/Cargo.toml.bak"
     printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n%s\n' "$dep_line" >"$d/foo/Cargo.toml"
-    ( cd "$d" && cargo generate-lockfile -q ) >/dev/null 2>&1
+    (cd "$d" && cargo generate-lockfile -q) >/dev/null 2>&1
     git -C "$d" add -A
     git -C "$d" commit -qm head
     git -C "$d" rev-parse HEAD
@@ -797,14 +836,15 @@ bump_pubdep_head() { # $1=repo  $2=new foo dependency line  -> head sha
 repo=$(new_pubdep_repo 'bar = { path = "../bar", version = "0.1" }' 'pub fn f() -> Result<(), bar::Error> { Ok(()) }')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(bump_pubdep_head "$repo" 'bar = { path = "../bar", version = "0.2" }')
-json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null ); rc=$?
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
+rc=$?
 assert_eq "$rc" 1 "public-dep: exposed major bump exits 1"
 if printf '%s' "$json" | jq -e '.totals.public_dep_breaking >= 1 and (.public_dep_breaks | any(.crate == "foo" and .dep == "bar" and .new == "0.2"))' >/dev/null 2>&1; then
     ok "public-dep: exposed major bump attributed to foo/bar"
 else
     bad "public-dep: expected foo/bar public_dep_break, got: $(printf '%s' "$json" | jq -c '.public_dep_breaks' 2>/dev/null)"
 fi
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "## foo" "public-dep --changelog: foo section present"
 assert_contains "$out" "- Migrated to \`bar 0.2\`; its types appear in this crate's public API, so downstream users must upgrade \`bar\` in lockstep." "public-dep --changelog: break folded into the single Migrated entry"
 case "$out" in
@@ -817,7 +857,7 @@ rm -rf "$repo"
 repo=$(new_pubdep_repo 'bar = { path = "../bar", version = "0.1" }' $'fn helper() -> Result<(), bar::Error> { Ok(()) }\npub fn f() {}')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(bump_pubdep_head "$repo" 'bar = { path = "../bar", version = "0.2" }')
-json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null )
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
 if printf '%s' "$json" | jq -e '.totals.public_dep_breaking == 0 and (.public_dep_breaks | length == 0)' >/dev/null 2>&1; then
     ok "public-dep: private-only use is not flagged"
 else
@@ -830,7 +870,7 @@ rm -rf "$repo"
 repo=$(new_pubdep_repo 'baz = { package = "bar", path = "../bar", version = "0.1" }' 'pub fn f() -> Result<(), baz::Error> { Ok(()) }')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(bump_pubdep_head "$repo" 'baz = { package = "bar", path = "../bar", version = "0.2" }')
-json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null )
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
 if printf '%s' "$json" | jq -e '.public_dep_breaks | any(.crate == "foo" and .dep == "baz")' >/dev/null 2>&1; then
     ok "public-dep: renamed dep (package = bar, used as baz) still joins"
 else
@@ -852,17 +892,17 @@ printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[depende
 printf 'pub fn f() -> Result<(), bar::Error> { Ok(()) }\n' >"$repo/foo/src/lib.rs"
 printf '[package]\nname = "bar"\nversion = "0.0.1"\nedition = "2021"\n' >"$repo/bar/Cargo.toml"
 printf 'pub struct Error;\n' >"$repo/bar/src/lib.rs"
-( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
+(cd "$repo" && cargo generate-lockfile -q) >/dev/null 2>&1
 git -C "$repo" add -A
 git -C "$repo" commit -qm base
 base=$(git -C "$repo" rev-parse HEAD)
 printf '[package]\nname = "bar"\nversion = "0.0.2"\nedition = "2021"\n' >"$repo/bar/Cargo.toml"
 printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nbar = { path = "../bar", version = "0.0.2" }\n' >"$repo/foo/Cargo.toml"
-( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
+(cd "$repo" && cargo generate-lockfile -q) >/dev/null 2>&1
 git -C "$repo" add -A
 git -C "$repo" commit -qm head
 head=$(git -C "$repo" rev-parse HEAD)
-json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null )
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
 if printf '%s' "$json" | jq -e '.public_dep_breaks | any(.crate == "foo" and .dep == "bar" and .new == "0.0.2")' >/dev/null 2>&1; then
     ok "public-dep: 0.0.x patch bump is semver-incompatible and joins"
 else
@@ -876,7 +916,7 @@ rm -rf "$repo"
 repo=$(new_pubdep_repo 'bar = { path = "../bar", version = "~0.1" }' 'pub fn f() -> Result<(), bar::Error> { Ok(()) }')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(bump_pubdep_head "$repo" 'bar = { path = "../bar", version = "~0.2" }')
-json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null )
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
 if printf '%s' "$json" | jq -e '.public_dep_breaks | any(.crate == "foo" and .dep == "bar")' >/dev/null 2>&1; then
     ok "public-dep: operator-prefixed requirement (~0.1 -> ~0.2) still joins"
 else
@@ -884,48 +924,8 @@ else
 fi
 rm -rf "$repo"
 
-# 13) Requirement classification, pinned directly. `cargo metadata` reports `req`
-#     strings that are not always a single version — operators, ranges, wildcards,
-#     pre-release metadata — and every dependency verdict rests on reading them
-#     correctly. Both helpers are pure, so extract and source them.
-cb_defs=$(mktemp)
-sed -n '/^req_norm() {/,/^}/p;/^req_version() {/,/^}/p;/^classify_bump() {/,/^}/p' "$ZC" >"$cb_defs"
-# shellcheck source=/dev/null
-. "$cb_defs"
-rm -f "$cb_defs"
-check_bump() { # $1=old  $2=new  $3=expected
-    assert_eq "$(classify_bump "$1" "$2")" "$3" "classify_bump: $1 -> $2 is $3"
-}
-# Cargo's caret rules: the leftmost nonzero component decides compatibility.
-check_bump 1.2.3 2.0.0 major
-check_bump 1.2.3 1.3.0 minor
-check_bump 1.2.3 1.2.4 patch
-check_bump 0.1 0.2 major
-check_bump 0.29 0.30 major
-check_bump 0.0.1 0.0.2 major
-check_bump 0.0.1 0.0.1 patch
-# Operators are not part of the version, and metadata does not move the triple —
-# the shape a crate graduating a pre-release produces.
-check_bump '~0.29' '~0.30' major
-check_bump '=0.0.1' '=0.0.2' major
-check_bump '1.0.0-rc1' '1.0.0' patch
-check_bump '0.30.0-pre.0' '0.30.0' patch
-# A compound range is represented by its floor, so a moved floor still classifies.
-check_bump '>=0.29, <0.31' '>=0.30, <0.32' major
-# But with the floor held, the change is confined to the ceiling, and the
-# requirement text alone does not say whether a consumer is affected: narrowing
-# drops a version from the resolvable set, widening admits one. Neither is
-# decidable here, so neither is guessed.
-check_bump '>=0.29, <0.31' '>=0.29, <0.30' unknown
-check_bump '>=0.29, <0.31' '>=0.29, <0.32' unknown
-# Same reasoning for an operator swap that keeps the version but changes the set.
-check_bump '>=0.29' '>0.29' unknown
-check_bump '^0.29' '~0.29' unknown
-# A bare requirement and a caret requirement are the same set, so that is no change.
-check_bump '0.29' '^0.29' patch
-# A wildcard reduces to its numeric prefix; a bare `*` names no version at all.
-check_bump '0.29.*' '0.30.*' major
-check_bump '*' '*' patch
+# 13) Requirement classification (`classify_bump` and friends) is pure logic and is pinned
+#     by the crate's own unit tests in src/version_req/tests.rs.
 # 12f) A reachable dependency whose requirement changed without moving the version
 #      it starts at is a review item, not a break: widening a ceiling cannot be
 #      shown incompatible from the requirement text. It must be reported, must say
@@ -943,23 +943,24 @@ printf '[package]\nname = "bar"\nversion = "0.1.0"\nedition = "2021"\n' >"$repo/
 printf 'pub struct Error;\n' >"$repo/bar/src/lib.rs"
 printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nbar = { path = "../bar", version = ">=0.1, <0.3" }\n' >"$repo/foo/Cargo.toml"
 printf 'pub fn f() -> Result<(), bar::Error> { Ok(()) }\n' >"$repo/foo/src/lib.rs"
-( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
+(cd "$repo" && cargo generate-lockfile -q) >/dev/null 2>&1
 git -C "$repo" add -A
 git -C "$repo" commit -qm base
 base=$(git -C "$repo" rev-parse HEAD)
 printf '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nbar = { path = "../bar", version = ">=0.1, <0.4" }\n' >"$repo/foo/Cargo.toml"
-( cd "$repo" && cargo generate-lockfile -q ) >/dev/null 2>&1
+(cd "$repo" && cargo generate-lockfile -q) >/dev/null 2>&1
 git -C "$repo" add -A
 git -C "$repo" commit -qm head
 head=$(git -C "$repo" rev-parse HEAD)
-json=$( cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null ); rc=$?
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
+rc=$?
 assert_eq "$rc" 0 "public-dep review: an undecidable requirement change does not fail the run"
 if printf '%s' "$json" | jq -e '.verdict == "ok" and .totals.public_dep_breaking == 0 and (.public_dep_breaks | any(.crate == "foo" and .dep == "bar" and .class == "review"))' >/dev/null 2>&1; then
     ok "public-dep review: reported as class review, excluded from the breaking count"
 else
     bad "public-dep review: expected an ok verdict with a review entry, got: $(printf '%s' "$json" | jq -c '{verdict, t: .totals.public_dep_breaking, b: .public_dep_breaks}' 2>/dev/null)"
 fi
-out=$( cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null )
+out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- Migrated to \`bar >=0.1, <0.4\`; its types appear in this crate's public API, so check whether downstream users are affected." "public-dep review --changelog: asks for review in the single Migrated entry"
 case "$out" in
 *"must upgrade"* | *"breaking change"*) bad "public-dep review --changelog: an undecidable change must not assert a break" ;;

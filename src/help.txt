@@ -1,0 +1,187 @@
+zc — Detect public API and dependency changes across all
+workspace crates.
+
+Compares every workspace crate between two git refs (baseline and head,
+where head defaults to the working tree if dirty, else HEAD). Up to four
+sections are emitted (sections 2 and 4 are opt-in):
+
+  1. Workspace dependency diff. Each dep is classified by the strongest
+     kind it is used with across the workspace (runtime > build > dev).
+     Optional runtime deps are labelled `runtime-opt`. Crates whose name
+     ends in `-test` (or is exactly `zebra-test`) are excluded from
+     classification so their transitive runtime deps don't masquerade as
+     production deps. Workspace-internal crates are excluded entirely (the
+     per-crate section already covers them).
+
+  2. Optional Cargo.lock diff (--with-lock). Transitive changes only;
+     direct workspace deps are suppressed because they already appear in
+     section 1.
+
+  3. Per-crate public API diff via `cargo public-api`.
+
+  4. Optional const/static value + doc-comment diff (--with-values).
+     cargo-public-api compares signatures only, so a `pub const` whose value
+     changes (e.g. 99 -> 1000) or an item whose doc text changes shows as
+     "no change". This section catches those via rustdoc JSON.
+
+PREREQUISITES
+  cargo install cargo-public-api --version 0.52.0 --locked
+  a nightly toolchain (builds rustdoc JSON)
+
+USAGE
+  zc [options] [<baseline> [<head>]]
+
+ARGUMENTS
+  <baseline>    Git ref to compare against: branch name, tag, or commit SHA.
+  <head>        Git ref to compare to.
+
+DEFAULT BEHAVIOR (when <head> is not given)
+  The script picks `head` based on whether the working tree is dirty, and —
+  when comparing against a parent branch — diffs from the *branch point* (the
+  merge-base of that branch and the head) rather than the branch's current
+  tip, so commits merged onto the parent after you branched don't pollute the
+  diff (or any changelog built from it):
+    - 0 args, dirty:  head = working tree, baseline = HEAD
+    - 0 args, clean:  head = HEAD,         baseline = merge-base(parent, HEAD)
+                                           (parent = upstream tracking ref, or 'main')
+    - 1 arg,  dirty:  head = working tree, baseline = merge-base(<arg>, HEAD)
+    - 1 arg,  clean:  head = HEAD,         baseline = merge-base(<arg>, HEAD)
+    - 2 args:         head = <arg2>,       baseline = <arg1>  (exact, no merge-base)
+
+  merge-base(X, HEAD) == X whenever X is already an ancestor of HEAD, so the
+  branch point only differs from the ref when the branch has advanced past it.
+  It is computed from local history — no network access needed.
+
+  "Working tree" includes both staged and unstaged changes plus any
+  untracked files (so a brand-new .rs file shows as added API).
+
+OPTIONS
+  -h, --help       Print this help message and exit.
+  -V, --version    Print the installed version and exit.
+  --with-lock      Also diff Cargo.lock for transitive dep changes.
+  --by-type        By default, per-crate API items are grouped into a
+                   module > type > member hierarchy: a module header, then a
+                   type sub-header tagged with its kind — read from its
+                   declaration in the diff, else the head source, else inferred
+                   from a member, else a generic `(type)`/`(mod)` — with the
+                   module and type
+                   prefixes factored out of each item; items living directly in
+                   a module (free fns, consts, mod decls) sit under the module
+                   header. --by-type uses a flat type grouping instead: one
+                   tagged header per type, members keeping their `Type::` prefix.
+                   In either mode, items whose path is in another crate (a
+                   trait impl this crate adds to a foreign type) are collected
+                   under a separate "trait impls on external types" section.
+  --flat           Don't group at all; print the original flat,
+                   fully-qualified, one-item-per-line list.
+  --with-values    Also diff public const/static values and doc text via
+                   rustdoc JSON. Catches changes cargo-public-api can't see
+                   because it is signature-only.
+  --changelog      Emit a librustzcash-style changelog (markdown) on stdout
+                   instead of the diff: one `## <crate>` section per changed
+                   crate, with `### Added`/`### Changed`/`### Removed` lists
+                   grouped under their owning type (own-crate paths made
+                   crate-relative, foreign-type paths kept in full). Per-crate
+                   dependency changes are folded in too: internal workspace
+                   bumps and external `Migrated to ...` lines under Changed,
+                   dropped deps under Removed. Other output is suppressed.
+                   The draft still needs curation: see librustzcash's
+                   CONTRIBUTING.md "Changelog Entries" for what requires an
+                   entry and how it is worded, and skills/zc/ for the
+                   curation workflow.
+  --json           Emit machine-readable JSON on stdout.
+                   Progress and diagnostics go to stderr. Schema:
+                     {
+                       baseline:     "<ref, or 'merge-base(<ref>, <head>)'>",
+                       baseline_sha: "<short sha>",
+                       head:         "<ref as given, or 'working tree'>",
+                       head_sha:     "<short sha>",
+                       verdict:      "ok" | "breaking" | "error",
+                       totals: {
+                         removed, changed, added,  # API items
+                         api_breaking,             # removed + changed
+                         dep_breaking,             # breaking runtime deps
+                         error_crates,             # cargo-public-api fails
+                         value_changed,            # const/static value changes
+                         doc_changed,              # doc-comment changes
+                         public_dep_breaking       # public-dep incompatible
+                       },
+                       deps: {
+                         removed: [ {name, version, kind} ],
+                         changed: [ {name, old, new, bump, kind, features} ],
+                         added:   [ {name, version, kind} ]
+                       },
+                       values: [ {crate, path, type, old, new} ],
+                       docs:   [ {crate, path} ],
+                       public_dep_breaks: [ {crate, dep, old, new,
+                                            class} ],   # breaking|review
+                       crates: [
+                         { name, removed, changed, added, status,
+                           error: null | {
+                             stage, ref, ref_sha, command, stderr, hint
+                           }
+                         }
+                       ]
+                     }
+                   Error `stage` is baseline_build, head_build, or diff.
+                   zc keeps --all-features and does not automatically fall
+                   back to default features because that can hide public API.
+
+EXAMPLES
+  zc                     # if dirty: HEAD -> working tree
+                                   # if clean: branch point with parent -> HEAD
+  zc main                # diff against the branch point with main
+                                   # (HEAD, or working tree if dirty)
+  zc v4.2.0              # diff against v4.2.0 (a tag/ancestor: exact)
+  zc v4.1.0 v4.2.0       # compare two arbitrary refs (exact, no merge-base)
+  zc --with-lock         # include transitive Cargo.lock diff
+  zc --with-values main  # also flag const/static value + doc changes
+  zc --json main         # machine-readable output for CI
+
+OUTPUT
+  Sections are printed in order:
+    1. Workspace dep diff — removed / changed / added.
+       Colors: red = consumer-visible breaking (runtime major bump,
+       runtime removal), yellow = changed but not breaking, dim =
+       internal (build / dev / runtime-opt), green = added.
+    2. Transitive Cargo.lock diff (only with --with-lock). Direct
+       workspace deps are suppressed (already in section 1); each
+       transitive crate is annotated with the direct deps that pull
+       it in (`via foo, bar` — truncated to 3 with `...(+N)`).
+    3. Per-crate public-API counts, one row per workspace crate:
+         crate-name   -R  ~C  +A  [(additive)]
+       Crates with only additions are tagged `(additive)` so reviewers
+       can focus on breaking ones. Crates with no changes show as
+       `no changes`; crates where cargo-public-api failed show as
+       `error: <message>`.
+    4. Summary table — aligned counts per crate plus a Total row,
+       printed only if at least one crate changed. Zero counts are
+       rendered as `-` for readability.
+    5. Detailed diffs — for each changed crate, the removed / changed
+       / added API items.
+    6. Value/doc changes (only with --with-values) — const/static values
+       shown as `old -> new` (counted as breaking), and public items whose
+       doc-comment text changed (informational).
+    7. Final verdict line: BREAKING / ERROR / OK with a one-line
+       summary of the contributing factors.
+  With --json a single JSON document is printed instead (schema above).
+
+ENVIRONMENT
+  CARGO_TARGET_DIR   Used as the root for zc's cache. When unset,
+                     `target/zc-cache/` is used. Dependency and derived
+                     TSV caches are keyed on the resolved ref SHA plus a hash
+                     of the zc binary. Rustdoc JSON is keyed on ref SHA, crate,
+                     cargo-public-api version, nightly rustc version, and
+                     feature policy.
+  ZC_TOOLCHAIN     Nightly toolchain name used to build rustdoc JSON.
+                     Defaults to the first installed `nightly*` toolchain.
+  NO_COLOR           When set to any non-empty value, disables ANSI
+                     color output (https://no-color.org).
+
+EXIT CODES
+  0   Clean. No breaking API, dependency, or value changes were found.
+  1   Breaking changes were detected.
+  2   Analysis error. zc could not produce a trustworthy verdict because
+      cargo-public-api, rustdoc, metadata, or another analysis step failed.
+  64  Usage or setup error, such as an unknown option, bad ref, missing
+      required tool, or unsupported shell.

@@ -81,22 +81,17 @@ cargo install cargo-public-api --version 0.52.0 --locked
 rustup toolchain install nightly-2026-07-18 --profile minimal
 ```
 
-Then get `zc` itself — it's a single Bash script. Install it onto your `PATH`:
+Then install `zc` itself, a single Rust binary:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/v0.3.0/zc -o ~/.local/bin/zc
-chmod +x ~/.local/bin/zc
+cargo install --git https://github.com/ZcashFoundation/zc --tag v0.3.0 --locked
 ```
 
-…or run a one-off without installing:
+…or from a checkout:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ZcashFoundation/zc/v0.3.0/zc | bash -s -- main
+cargo install --path . --locked
 ```
-
-> When run via `curl … | bash`, `--help` shows only a short usage (the script
-> can't re-read its own source from a pipe); install it to a file for the full
-> reference.
 
 ## Usage
 
@@ -242,9 +237,7 @@ Then ask Claude to "produce the changelog for PR #N" (or invoke `/zc N`).
 
 ## Requirements
 
-- Bash 4+ (associative arrays). On macOS, zc tries to re-exec with `bash` from PATH, `/opt/homebrew/bin/bash`, or `/usr/local/bin/bash` before failing. Install it with `brew install bash`.
 - [`cargo-public-api`](https://github.com/cargo-public-api/cargo-public-api)
-- `jq`
 - a `nightly` toolchain for rustdoc JSON builds
 
 ## Exit codes

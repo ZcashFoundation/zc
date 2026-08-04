@@ -30,13 +30,9 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Check system dependencies
+    - name: Build zc
       shell: bash
-      run: |
-        if ! command -v jq >/dev/null 2>&1; then
-          echo "::error title=Missing zc dependency::Install jq on the runner before using this action."
-          exit 64
-        fi
+      run: cargo install --path "$GITHUB_ACTION_PATH" --locked --root "$RUNNER_TEMP/zc-bin"
 
     - name: Install the Rust nightly used by zc
       shell: bash
@@ -90,4 +86,4 @@ runs:
           arguments+=("$INPUT_HEAD")
         fi
 
-        "$GITHUB_ACTION_PATH/zc" "${arguments[@]}"
+        "$RUNNER_TEMP/zc-bin/bin/zc" "${arguments[@]}"
