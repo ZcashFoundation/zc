@@ -1,4 +1,4 @@
-//! Librustzcash-style changelog document rendering.
+//! Keep a Changelog document rendering.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
