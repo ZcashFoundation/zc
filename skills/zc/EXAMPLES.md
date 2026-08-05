@@ -18,7 +18,7 @@ made up; only the shape matters.
 
 ## Reasoning
 
-- `network::Peer::Inbound` is a new enum variant. lrz lists new variants under
+- `network::Peer::Inbound` is a new enum variant. New variants are listed under
   `### Added` even when they force a major bump (see `TxVersion::V6` in
   zcash_primitives) — it does not hoist them into a breaking section. It stays under
   `### Added`; the crate's major version bump records the break.

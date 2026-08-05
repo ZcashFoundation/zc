@@ -102,7 +102,7 @@ zc v4.1.0 v4.2.0         # compare two arbitrary refs (exact, no merge-base)
 zc --with-lock           # include the transitive Cargo.lock diff
 zc --with-values main    # also flag const/static value + doc changes
 zc --json main           # machine-readable output for CI
-zc --changelog main      # draft a librustzcash-style changelog (markdown)
+zc --changelog main      # draft a Keep a Changelog changelog (markdown)
 zc --version             # print the installed version
 ```
 
@@ -158,16 +158,16 @@ excluded outside zc, or handled by a caller with an explicit feature policy.
 
 ### `--changelog`
 
-`--changelog` drafts a [librustzcash](https://github.com/zcash/librustzcash)-style
+`--changelog` drafts a [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 changelog (markdown) instead of the diff: one `## <crate>` section per changed
 crate, with `### Added` / `### Changed` / `### Removed` lists.
 
 - Added/removed API items are grouped under their owning type, with own-crate
   paths made crate-relative (e.g. `error::TransactionError`) and foreign-type
   paths kept in full. Several members of one type are brace-grouped onto a single
-  bullet, lrz-style: `` - `OutPoint::{NULL, new, read, write}` ``. When that brace
+  bullet: `` - `OutPoint::{NULL, new, read, write}` ``. When that brace
   line would exceed ~100 chars, it breaks onto a `` `Type`: `` header with one
-  2-space-indented `` - `member` `` per line, again matching librustzcash.
+  2-space-indented `` - `member` `` per line.
 - Changed items show the old → new signature, so the entry says *what* changed
   (e.g. a return type going from `Result<Self, E>` to `Self`) rather than just
   naming the item.
@@ -192,12 +192,11 @@ It's a *draft* — review and curate before committing. Needs a `nightly`
 toolchain for the trait attribution (without one it falls back to plain
 type grouping).
 
-The curation rules are librustzcash's
-[Changelog Entries](https://github.com/zcash/librustzcash/blob/main/CONTRIBUTING.md#changelog-entries)
-guidance, which zc tracks: what needs an entry (including bug fixes and semantic
-changes zc's signature diff cannot see), that an entry describes the change since the
-crate's last release rather than since zc's baseline, and that it belongs in the commit
-that makes the change. The [`skills/zc/`](#claude-code-skill) skill encodes them.
+Keep a Changelog fixes the sections and their order; it does not say which changes
+deserve an entry. Curation does: a bug fix or a semantic change that zc's signature
+diff cannot see still needs a bullet, an entry describes the change since the crate's
+last release rather than since zc's baseline, and it belongs in the commit that makes
+the change. The [`skills/zc/`](#claude-code-skill) skill encodes those rules.
 
 ### Baseline: the branch point, not the tip
 
@@ -220,8 +219,8 @@ two-ref comparison (`zc v4.1.0 v4.2.0`) is always taken literally.
 `skills/zc/` bundles a [Claude Code](https://claude.com/claude-code) skill
 that drives the full "draft a changelog for a PR" workflow: it runs
 `zc --changelog` against the PR's branch point and curates the draft into
-[librustzcash](https://github.com/zcash/librustzcash)-style `CHANGELOG.md` entries
-(Keep a Changelog sections in `Added`/`Changed`/`Deprecated`/`Removed`/`Fixed`/`Security`
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) `CHANGELOG.md` entries
+(sections in `Added`/`Changed`/`Deprecated`/`Removed`/`Fixed`/`Security`
 order — no `### Breaking Changes` section; breaking changes live under `### Changed`/
 `### Removed` as prose, periods only on prose bullets), merged into the existing
 `[Unreleased]` section.

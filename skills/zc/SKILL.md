@@ -1,17 +1,17 @@
 ---
 name: zc
 description: >-
-  Produce librustzcash-style CHANGELOG entries for the current branch (or a
+  Produce Keep a Changelog CHANGELOG entries for the current branch (or a
   given PR/branch) by running zc and writing them into the repo's CHANGELOG.md
   files; or, with `/zc --check`, verify the existing entries against zc and report
   discrepancies without writing. Use when the user asks to write/draft/produce or
   check/verify a changelog for a branch or PR, or turn a zc diff into entries.
 ---
 
-# Produce librustzcash-style changelogs with zc
+# Produce Keep a Changelog changelogs with zc
 
 Run `zc --changelog`, curate its draft into
-[librustzcash](https://github.com/zcash/librustzcash)-style entries, and
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) entries, and
 **write them into the repo's `CHANGELOG.md` files**. Needs `zc` on `PATH` (plus
 its prereqs: `cargo-public-api`, a nightly toolchain).
 
@@ -34,8 +34,8 @@ reports discrepancies against zc and writes nothing, the fast pre-PR gate.
 
 ## What requires an entry
 
-The zc diff is the API signal, not the whole requirement. [librustzcash
-CONTRIBUTING][lrz-changelog] — the style zc targets — requires an entry for:
+The zc diff is the API signal, not the whole requirement. Keep a Changelog fixes the
+sections, not what belongs in them; an entry is required for:
 
 - any change to a crate's public API;
 - any bug fix;
@@ -46,8 +46,8 @@ CONTRIBUTING][lrz-changelog] — the style zc targets — requires an entry for:
   when documented only in code comments;
 - a version bump of a dependency **whose types appear in the public API**. Types from
   two semver-incompatible versions of a crate do not unify, so a consumer has to
-  upgrade that dependency in lockstep — that is the rationale lrz gives for recording
-  these ([zebra#11111][dep-rationale]). Rust-flavored semver makes `0.29 → 0.30`
+  upgrade that dependency in lockstep, which is why these are recorded
+  ([zebra#11111][dep-rationale]). Rust-flavored semver makes `0.29 → 0.30`
   breaking here. The draft covers this: zc emits one `Migrated to …` bullet per
   external requirement change, and when the dep is major-bumped and reachable in the
   crate's public API — the case where no signature text changed, so `cargo public-api`
@@ -57,7 +57,6 @@ The exception is a crate that has **never been released**: its changelog gets on
 `- Initial release!` under the version heading, with no itemized API. There is no prior
 release for a user to adapt from, so discard zc's draft for such a crate.
 
-[lrz-changelog]: https://github.com/zcash/librustzcash/blob/main/CONTRIBUTING.md#changelog-entries
 [zebra-changelog]: https://github.com/ZcashFoundation/zebra/blob/main/book/src/dev/changelog-guidelines.md
 [dep-rationale]: https://github.com/ZcashFoundation/zebra/pull/11111#issuecomment-5097643724
 
@@ -85,8 +84,7 @@ release for a user to adapt from, so discard zc's draft for such a crate.
   `### Deprecated`, or `### Security` entry may still come from the PR (step 4).
 
 ### 3. Place breaking changes in their natural section
-librustzcash has **no `### Breaking Changes` section** — Keep a Changelog does not
-define one, and lrz does not add it. A breaking change lives in the section that
+There is **no `### Breaking Changes` section** — Keep a Changelog does not define one. A breaking change lives in the section that
 names what happened; the crate's semver **major** bump (chosen by the version-bump
 step, not here) is what records that the release breaks:
 - **Removed**: removing any public item. Under `### Removed`.
@@ -94,7 +92,7 @@ step, not here) is what records that the release breaks:
   `### Changed`, as prose stating the new behavior and what callers must do —
   "`Foo::bar` now takes a `NonZeroU8` instead of a `u8`." (see REFERENCE.md).
 - **Added**: additions stay under `### Added`, even the ones that force a major bump.
-  These look additive but break downstream — leave them under `### Added` (lrz lists
+  These look additive but break downstream — leave them under `### Added` (list
   new variants there, e.g. `TxVersion::V6`) and let the version bump carry the break:
   - a new variant on an enum that is **not `#[non_exhaustive]`** (exhaustive `match`es
     stop compiling);
@@ -105,8 +103,8 @@ step, not here) is what records that the release breaks:
     crate implements, e.g. a generated server trait, is not breaking).
 
 Reserve an inline **BREAKING CHANGES** marker (bold, at the start of the bullet) for
-an exceptionally disruptive change such as a wholesale database-schema migration, as
-lrz uses it rarely. Do not tag every breaking bullet, and never add a `(breaking; …)`
+an exceptionally disruptive change such as a wholesale database-schema migration. Use
+it rarely: do not tag every breaking bullet, and never add a `(breaking; …)`
 gloss.
 
 ### 4. Sort into sections
@@ -233,7 +231,7 @@ unknown option. The skill runs the ordinary diff (steps 1 and 2), then compares 
    entry in that same commit.
 
 ## Notes
-- Library-crate changelogs follow librustzcash style (terse, code-pathed); the
-  workspace `CHANGELOG.md` uses plain, user-facing descriptions.
+- Library-crate changelogs are terse and code-pathed; the workspace `CHANGELOG.md`
+  uses plain, user-facing descriptions.
 - zc's baseline is the branch point by default, so a stale local `main` or a
   branch that is behind upstream will not pollute the diff.
