@@ -11,7 +11,7 @@ struct Case {
 }
 
 #[test]
-fn renders_librustzcash_changelog_groups() {
+fn renders_changelog_groups() {
     let cases = [
         Case {
             name: "brace-grouped members",

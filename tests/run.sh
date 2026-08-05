@@ -389,7 +389,7 @@ else
 fi
 rm -rf "$ws"
 
-# 6h) --changelog emits librustzcash-style markdown: per-crate heading, ### Added,
+# 6h) --changelog emits Keep a Changelog markdown: per-crate heading, ### Added,
 #     items grouped under their type with bare member names.
 repo=$(new_repo 'pub fn placeholder() {}')
 base=$(git -C "$repo" rev-parse HEAD)
@@ -400,7 +400,7 @@ assert_contains "$out" "### Added" "--changelog: Added section"
 assert_contains "$out" "- \`Widget::{new, run}\`" "--changelog: type members brace-grouped on one line"
 rm -rf "$repo"
 
-# 6h2) --changelog wraps an over-wide brace group lrz-style: when `Type::{...}`
+# 6h2) --changelog wraps an over-wide brace group: when `Type::{...}`
 #      would exceed the line budget, it breaks onto a `Type:` header with one
 #      2-space-indented member per line instead of one long brace line.
 repo=$(new_repo 'pub fn placeholder() {}')
@@ -569,7 +569,7 @@ out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- MSRV is now 1.75." "--changelog: MSRV bump documented under Changed"
 rm -rf "$repo"
 
-# 6o) A trait implemented on several types is grouped by trait, lrz-style:
+# 6o) A trait implemented on several types is grouped by trait:
 #     `impl Trait` for: + the types as sub-bullets.
 repo=$(new_repo $'pub trait Marker {}\npub struct A;\npub struct B;')
 base=$(git -C "$repo" rev-parse HEAD)
@@ -663,7 +663,7 @@ assert_contains "$out" "impl Hash for K" "--changelog: -ss surfaces auto-derived
 rm -rf "$repo"
 
 # 6t) Several member-less impls on one type collapse to `impl {A, B, ...} for T`
-#     (lrz's many-traits-one-type form), e.g. a new type and its derives.
+#     (the many-traits-one-type form), e.g. a new type and its derives.
 repo=$(new_repo 'pub struct Foo;')
 base=$(git -C "$repo" rev-parse HEAD)
 head=$(commit_lib "$repo" $'pub struct Foo;\n#[derive(Clone, Debug)]\npub struct Bar(pub u8);' 'derive Clone, Debug on Bar')

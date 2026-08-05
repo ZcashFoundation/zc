@@ -6,10 +6,10 @@ flow (sections, breaking changes, where entries come from) is in
 
 ## Sections
 Order (Keep a Changelog): `### Added`, `### Changed`, `### Deprecated`, `### Removed`,
-`### Fixed`, `### Security`. There is **no `### Breaking Changes` section** — lrz does
-not use one. Breaking items sit in `### Removed` (removals) or `### Changed`
-(signature/behavior/type changes); an exceptionally disruptive one may open its
-bullet with a bold **BREAKING CHANGES** marker, as lrz does rarely.
+`### Fixed`, `### Security`. There is **no `### Breaking Changes` section** — Keep a
+Changelog does not define one. Breaking items sit in `### Removed` (removals) or
+`### Changed` (signature/behavior/type changes); an exceptionally disruptive one may
+open its bullet with a bold **BREAKING CHANGES** marker, used rarely.
 
 ## Periods
 - No trailing period on a pure-identifier bullet, an `impl ... for ...` bullet, or a

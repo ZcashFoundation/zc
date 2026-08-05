@@ -77,7 +77,7 @@ OPTIONS
   --with-values    Also diff public const/static values and doc text via
                    rustdoc JSON. Catches changes cargo-public-api can't see
                    because it is signature-only.
-  --changelog      Emit a librustzcash-style changelog (markdown) on stdout
+  --changelog      Emit a Keep a Changelog changelog (markdown) on stdout
                    instead of the diff: one `## <crate>` section per changed
                    crate, with `### Added`/`### Changed`/`### Removed` lists
                    grouped under their owning type (own-crate paths made
@@ -85,10 +85,9 @@ OPTIONS
                    dependency changes are folded in too: internal workspace
                    bumps and external `Migrated to ...` lines under Changed,
                    dropped deps under Removed. Other output is suppressed.
-                   The draft still needs curation: see librustzcash's
-                   CONTRIBUTING.md "Changelog Entries" for what requires an
-                   entry and how it is worded, and skills/zc/ for the
-                   curation workflow.
+                   The draft still needs curation: Keep a Changelog fixes
+                   the sections, not which changes deserve an entry. See
+                   skills/zc/ for the curation workflow.
   --json           Emit machine-readable JSON on stdout.
                    Progress and diagnostics go to stderr. Schema:
                      {
