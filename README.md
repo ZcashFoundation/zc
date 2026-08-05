@@ -49,7 +49,7 @@ steps:
       ref: ${{ github.event.pull_request.head.sha }}
       fetch-depth: 0
       persist-credentials: false
-  - uses: ZcashFoundation/zc@v0.3.0
+  - uses: ZcashFoundation/zc@v0.4.0
     with:
       baseline: origin/${{ github.base_ref }}
 ```
@@ -84,7 +84,7 @@ rustup toolchain install nightly-2026-07-18 --profile minimal
 Then install `zc` itself, a single Rust binary:
 
 ```sh
-cargo install --git https://github.com/ZcashFoundation/zc --tag v0.3.0 --locked
+cargo install --git https://github.com/ZcashFoundation/zc --tag v0.4.0 --locked
 ```
 
 …or from a checkout:
