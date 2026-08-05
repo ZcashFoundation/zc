@@ -1,4 +1,4 @@
-//! Librustzcash-style changelog rendering for public API diff lines.
+//! Keep a Changelog rendering for public API diff lines.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
