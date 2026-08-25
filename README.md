@@ -50,11 +50,17 @@ steps:
       fetch-depth: 0
       persist-credentials: false
   - uses: ZcashFoundation/zc@v0.4.1
+    id: api
     with:
       baseline: origin/${{ github.base_ref }}
+      fail-on: breaking
 ```
 
 The action installs the `cargo-public-api` and Rust nightly versions tested with that `zc` release. It compares the pull request head with its branch point from the baseline, then fails with the same exit-code contract as the CLI. Set `head` when both refs must be compared literally, or enable `with-lock` and `with-values` for the optional analyses.
+
+`fail-on` chooses which findings fail the step: `breaking` (the default), `api-breaking` to let dependency, value, and doc changes pass, `error` for analysis failures only, or `none`. Findings are reported the same way in every mode.
+
+The step sets two outputs: `verdict` (`ok`, `breaking`, or `error`) and `report`, the path of the JSON report, so a later step can read `${{ steps.api.outputs.verdict }}` or parse the full document. Inside Actions, `zc` also annotates the run and writes a summary of the verdict, totals, and per-crate counts to the job summary.
 
 Pin the action to a full commit SHA when the workflow requires an immutable dependency.
 
@@ -102,6 +108,8 @@ zc v4.1.0 v4.2.0         # compare two arbitrary refs (exact, no merge-base)
 zc --with-lock           # include the transitive Cargo.lock diff
 zc --with-values main    # also flag const/static value + doc changes
 zc --json main           # machine-readable output for CI
+zc --report zc.json main # also write the JSON report to a file
+zc --fail-on none main   # report every finding without failing the run
 zc --changelog main      # draft a Keep a Changelog changelog (markdown)
 zc --version             # print the installed version
 ```
@@ -111,7 +119,9 @@ Run `zc --help` for the full option and output reference.
 ### `--json`
 
 `--json` writes a single JSON document to stdout. Progress and diagnostics go to
-stderr.
+stderr. `--report <path>` writes that same document to a file in any mode, so a
+run can keep the human report on stdout and still hand the JSON to another step.
+The report directory must already exist.
 
 Top-level fields:
 
@@ -247,6 +257,11 @@ Then ask Claude to "produce the changelog for PR #N" (or invoke `/zc N`).
   includes `cargo public-api` or rustdoc failures for one or more crates.
 - `64` means usage or setup error, such as an unknown option, bad ref, missing
   required tool, or unsupported shell.
+
+`--fail-on` selects which findings reach `1` and `2`; the codes keep their
+meaning. `api-breaking` limits `1` to public API and public-dependency breaks,
+`error` reserves failure for an inconclusive analysis, and `none` always exits
+`0`.
 
 ## License
 

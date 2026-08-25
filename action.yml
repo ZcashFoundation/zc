@@ -26,6 +26,18 @@ inputs:
     description: Include public const, static value, and documentation changes
     required: false
     default: "false"
+  fail-on:
+    description: Findings that fail the step (breaking, api-breaking, error, or none)
+    required: false
+    default: breaking
+
+outputs:
+  verdict:
+    description: ok, breaking, or error
+    value: ${{ steps.check.outputs.verdict }}
+  report:
+    description: Absolute path of the JSON report file
+    value: ${{ steps.check.outputs.report }}
 
 runs:
   using: composite
@@ -49,6 +61,7 @@ runs:
         RUSTUP_TOOLCHAIN: nightly-2026-07-18
 
     - name: Check the public API and dependencies
+      id: check
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
@@ -56,6 +69,7 @@ runs:
         INPUT_HEAD: ${{ inputs.head }}
         INPUT_WITH_LOCK: ${{ inputs.with-lock }}
         INPUT_WITH_VALUES: ${{ inputs.with-values }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
         RUSTUP_TOOLCHAIN: nightly-2026-07-18
         ZC_TOOLCHAIN: nightly-2026-07-18
       run: |
@@ -81,9 +95,33 @@ runs:
             ;;
         esac
 
+        case "$INPUT_FAIL_ON" in
+          breaking | api-breaking | error | none) arguments+=(--fail-on "$INPUT_FAIL_ON") ;;
+          *)
+            echo "::error title=Invalid fail-on input::Expected breaking, api-breaking, error, or none."
+            exit 64
+            ;;
+        esac
+
+        report=$RUNNER_TEMP/zc-report.json
+        rm -f "$report"
+        arguments+=(--report "$report")
+
         arguments+=("$INPUT_BASELINE")
         if [[ -n "$INPUT_HEAD" ]]; then
           arguments+=("$INPUT_HEAD")
         fi
 
-        "$RUNNER_TEMP/zc-bin/bin/zc" "${arguments[@]}"
+        status=0
+        "$RUNNER_TEMP/zc-bin/bin/zc" "${arguments[@]}" || status=$?
+
+        verdict=""
+        if [[ -f "$report" ]]; then
+          verdict=$(jq -r '.verdict' "$report")
+        fi
+        {
+          echo "verdict=$verdict"
+          echo "report=$report"
+        } >>"$GITHUB_OUTPUT"
+
+        exit "$status"
