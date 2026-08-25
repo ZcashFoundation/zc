@@ -136,3 +136,11 @@ fn none_mode_never_fails() {
     assert_eq!(everything.verdict(), Verdict::Error);
     assert_eq!(FailOn::None.exit_code(&everything), EXIT_OK);
 }
+
+#[test]
+fn only_the_failing_modes_report_an_api_break_as_an_error() {
+    assert!(FailOn::Breaking.fails_on_api_break());
+    assert!(FailOn::ApiBreaking.fails_on_api_break());
+    assert!(!FailOn::Error.fails_on_api_break());
+    assert!(!FailOn::None.fails_on_api_break());
+}

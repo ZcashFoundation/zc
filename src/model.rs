@@ -50,6 +50,11 @@ impl FailOn {
         }
     }
 
+    /// True when a public API or public-dependency break makes the run fail.
+    pub fn fails_on_api_break(self) -> bool {
+        matches!(self, FailOn::Breaking | FailOn::ApiBreaking)
+    }
+
     /// Exit code for a finished analysis under this policy.
     pub fn exit_code(self, report: &Report) -> i32 {
         let verdict = report.verdict();
@@ -210,6 +215,8 @@ pub struct DepRemoved {
     pub name: String,
     pub version: String,
     pub kind: String,
+    /// Counted in [`DepDiff::breaking`].
+    pub breaking: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +228,8 @@ pub struct DepChanged {
     pub kind: String,
     /// Rendered feature delta, e.g. `-default!,+std,-foo` (empty when unchanged).
     pub features: String,
+    /// Counted in [`DepDiff::breaking`].
+    pub breaking: bool,
 }
 
 #[derive(Clone, Debug)]

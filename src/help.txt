@@ -189,6 +189,12 @@ ENVIRONMENT
                      Defaults to the first installed `nightly*` toolchain.
   NO_COLOR           When set to any non-empty value, disables ANSI
                      color output (https://no-color.org).
+  GITHUB_ACTIONS     When set to "true", zc also writes workflow-command
+                     annotations for the final result to stderr, at the
+                     severity --fail-on gives them.
+  GITHUB_STEP_SUMMARY
+                     File the job summary (verdict, totals, and per-crate
+                     counts) is appended to.
 
 EXIT CODES
   --fail-on selects which findings reach codes 1 and 2; the codes themselves

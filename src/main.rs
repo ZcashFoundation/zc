@@ -13,6 +13,7 @@ mod changelog_out;
 mod ctx;
 mod deps;
 mod git;
+mod github;
 mod group;
 mod json;
 mod lock;
@@ -138,8 +139,11 @@ fn missing_value(style: &Style, option: &str) -> String {
     )
 }
 
-/// Apply the exit-code policy to the finished analysis.
+/// Emit the GitHub Actions view of the finished analysis and apply the exit-code policy.
 fn finish(ctx: &Ctx, report: &Report) -> i32 {
+    if github::is_active() {
+        github::emit(report, ctx.opts.fail_on);
+    }
     ctx.opts.fail_on.exit_code(report)
 }
 

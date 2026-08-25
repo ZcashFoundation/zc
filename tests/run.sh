@@ -1067,6 +1067,37 @@ rc=$?
 assert_eq "$rc" 64 "--report: missing value exits 64"
 assert_contains "$out" "'--report' needs a value" "--report: explains the missing value"
 
+# 16) Inside GitHub Actions, the final result is annotated on stderr and summarized in
+#     the step summary file. Stdout stays the report a human reads.
+summary_file=$(mktemp)
+stdout_file=$(mktemp)
+stderr_file=$(mktemp)
+(cd "$repo" && GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$summary_file" "$ZC" "$base" "$head" >"$stdout_file" 2>"$stderr_file")
+rc=$?
+gh_stdout=$(cat "$stdout_file")
+gh_stderr=$(cat "$stderr_file")
+gh_summary=$(cat "$summary_file")
+assert_eq "$rc" 1 "GitHub Actions: the exit-code contract is unchanged"
+assert_contains "$gh_stderr" "::error title=Breaking public API change::1 breaking change(s) in zc_fixture" "GitHub Actions: annotates the break on stderr"
+case "$gh_stdout" in
+*"::"*) bad "GitHub Actions: workflow commands must not reach stdout" ;;
+*) ok "GitHub Actions: stdout carries no workflow commands" ;;
+esac
+assert_contains "$gh_summary" "## zc: breaking" "GitHub Actions: the step summary states the verdict"
+assert_contains "$gh_summary" "| Crate | Removed | Changed | Added |" "GitHub Actions: the step summary lists the changed crates"
+assert_contains "$gh_summary" "| zc_fixture | 1 | 0 | 1 |" "GitHub Actions: the per-crate counts match the diff"
+: >"$summary_file"
+(cd "$repo" && GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$summary_file" "$ZC" --fail-on none "$base" "$head" >"$stdout_file" 2>"$stderr_file")
+rc=$?
+gh_stderr=$(cat "$stderr_file")
+assert_eq "$rc" 0 "GitHub Actions: --fail-on none exits 0"
+assert_contains "$gh_stderr" "::warning title=Breaking public API change::" "GitHub Actions: a break that does not fail the run is a warning"
+rm -f "$summary_file" "$stdout_file" "$stderr_file"
+out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
+case "$out" in
+*"::"*) bad "no GitHub Actions: workflow commands must not be emitted locally" ;;
+*) ok "no GitHub Actions: no workflow commands are emitted locally" ;;
+esac
 rm -rf "$repo"
 
 echo ""
