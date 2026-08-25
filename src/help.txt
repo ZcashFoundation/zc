@@ -125,6 +125,8 @@ OPTIONS
                    Error `stage` is baseline_build, head_build, or diff.
                    zc keeps --all-features and does not automatically fall
                    back to default features because that can hide public API.
+  --report <path>  Also write the --json document to <path>, keeping the
+                   selected output on stdout. The directory must already exist.
 
 EXAMPLES
   zc                     # if dirty: HEAD -> working tree
@@ -136,6 +138,7 @@ EXAMPLES
   zc --with-lock         # include transitive Cargo.lock diff
   zc --with-values main  # also flag const/static value + doc changes
   zc --json main         # machine-readable output for CI
+  zc --report r.json     # also write the JSON report to a file
 
 OUTPUT
   Sections are printed in order:

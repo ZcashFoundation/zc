@@ -20,12 +20,14 @@ mod model;
 mod progress;
 mod pubdep;
 mod render;
+mod report_file;
 mod style;
 mod traitmap;
 mod values;
 mod version_req;
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use ctx::Ctx;
@@ -59,6 +61,7 @@ fn parse_args(argv: Vec<String>, style: &Style) -> Result<Args, (String, i32)> {
         json_mode: false,
         changelog_mode: false,
         group_mode: GroupMode::Mod,
+        report_path: None,
     };
     let mut positional = Vec::new();
     let mut it = argv.into_iter();
@@ -72,6 +75,12 @@ fn parse_args(argv: Vec<String>, style: &Style) -> Result<Args, (String, i32)> {
             "--with-values" => opts.with_values = true,
             "--json" => opts.json_mode = true,
             "--changelog" => opts.changelog_mode = true,
+            "--report" => {
+                let Some(path) = it.next() else {
+                    return Err((missing_value(style, "--report"), EXIT_USAGE));
+                };
+                opts.report_path = Some(PathBuf::from(path));
+            }
             "--" => {
                 positional.extend(it);
                 break;
@@ -105,6 +114,13 @@ fn parse_args(argv: Vec<String>, style: &Style) -> Result<Args, (String, i32)> {
     Ok(Args { opts, positional })
 }
 
+fn missing_value(style: &Style, option: &str) -> String {
+    format!(
+        "{}error:{} '{option}' needs a value (run with --help for usage)",
+        style.red, style.reset
+    )
+}
+
 fn run() -> Result<i32, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // Style for pre-parse diagnostics: assume a document mode only once we know.
@@ -123,6 +139,16 @@ fn run() -> Result<i32, String> {
     let opts = args.opts;
     let document_mode = opts.json_mode || opts.changelog_mode;
     let style = Style::detect(document_mode);
+
+    if let Some(path) = &opts.report_path {
+        if let Err(message) = report_file::check_dir(path) {
+            eprintln!(
+                "{}error:{} {message} (run with --help for usage)",
+                style.red, style.reset
+            );
+            return Ok(EXIT_USAGE);
+        }
+    }
 
     // ── ref resolution ────────────────────────────────────────────────
     let positional = args.positional;
@@ -413,6 +439,11 @@ fn run() -> Result<i32, String> {
         pubdep_break_total,
         pubdep_review_total,
     };
+
+    if let Some(path) = &ctx.opts.report_path {
+        report_file::write(path, &json::emit(&report))
+            .map_err(|e| format!("{}error:{} {e}", ctx.style.red, ctx.style.reset))?;
+    }
 
     // ── summary ───────────────────────────────────────────────────────
     if !document_mode {

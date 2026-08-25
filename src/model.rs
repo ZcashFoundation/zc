@@ -1,6 +1,7 @@
 //! Shared data model. Every module in this crate speaks these types; nothing here shells out.
 
 use std::fmt;
+use std::path::PathBuf;
 
 /// Exit codes, mirroring the documented contract.
 pub const EXIT_OK: i32 = 0;
@@ -33,6 +34,8 @@ pub struct Options {
     pub json_mode: bool,
     pub changelog_mode: bool,
     pub group_mode: GroupMode,
+    /// Path the JSON report is written to, in addition to the selected stdout output.
+    pub report_path: Option<PathBuf>,
 }
 
 /// The two ends of the comparison, fully resolved.

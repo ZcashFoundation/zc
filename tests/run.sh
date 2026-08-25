@@ -968,6 +968,33 @@ case "$out" in
 esac
 rm -rf "$repo"
 
+# 15) --report writes the --json document to a file while stdout keeps the human report.
+repo=$(new_repo 'pub fn foo() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap')
+report_dir=$(mktemp -d)
+out=$(cd "$repo" && "$ZC" --report "$report_dir/report.json" "$base" "$head" 2>/dev/null)
+rc=$?
+assert_eq "$rc" 1 "--report: the exit-code contract is unchanged"
+assert_contains "$out" "BREAKING" "--report: stdout keeps the human report"
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
+assert_eq "$(cat "$report_dir/report.json")" "$json" "--report: the file holds the --json document"
+out=$(cd "$repo" && "$ZC" --json --report "$report_dir/both.json" "$base" "$head" 2>/dev/null)
+assert_eq "$(cat "$report_dir/both.json")" "$out" "--report: combines with --json"
+rm -rf "$report_dir"
+
+# 15b) A missing report directory is rejected before any analysis runs.
+out=$(cd "$repo" && "$ZC" --report /nonexistent-zc-dir/report.json "$base" "$head" 2>&1)
+rc=$?
+assert_eq "$rc" 64 "--report: a missing directory exits 64"
+assert_contains "$out" "report directory '/nonexistent-zc-dir' does not exist" "--report: names the missing directory"
+out=$("$ZC" --report 2>&1)
+rc=$?
+assert_eq "$rc" 64 "--report: missing value exits 64"
+assert_contains "$out" "'--report' needs a value" "--report: explains the missing value"
+
+rm -rf "$repo"
+
 echo ""
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]
