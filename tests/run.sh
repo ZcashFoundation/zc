@@ -968,6 +968,80 @@ case "$out" in
 esac
 rm -rf "$repo"
 
+# 14) --fail-on selects which findings exit non-zero. The analysis, the verdict and
+#     the printed report are the same in every mode.
+repo=$(new_repo 'pub fn foo() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" 'pub fn bar() {}' 'swap foo -> bar')
+default_out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
+out=$(cd "$repo" && "$ZC" --fail-on breaking "$base" "$head" 2>&1)
+rc=$?
+assert_eq "$rc" 1 "--fail-on breaking: API break exits 1"
+assert_eq "$out" "$default_out" "--fail-on breaking: output matches the default mode"
+out=$(cd "$repo" && "$ZC" --fail-on api-breaking "$base" "$head" 2>&1)
+rc=$?
+assert_eq "$rc" 1 "--fail-on api-breaking: API break exits 1"
+out=$(cd "$repo" && "$ZC" --fail-on error "$base" "$head" 2>&1)
+rc=$?
+assert_eq "$rc" 0 "--fail-on error: API break exits 0"
+assert_contains "$out" "BREAKING" "--fail-on error: the break is still reported"
+assert_eq "$out" "$default_out" "--fail-on error: output matches the default mode"
+out=$(cd "$repo" && "$ZC" --fail-on none "$base" "$head" 2>&1)
+rc=$?
+assert_eq "$rc" 0 "--fail-on none: API break exits 0"
+assert_eq "$out" "$default_out" "--fail-on none: output matches the default mode"
+json=$(cd "$repo" && "$ZC" --json --fail-on none "$base" "$head" 2>/dev/null)
+rc=$?
+assert_eq "$rc" 0 "--fail-on none: --json exits 0"
+if printf '%s' "$json" | jq -e '.verdict == "breaking"' >/dev/null 2>&1; then
+    ok "--fail-on none: the verdict still reads breaking"
+else
+    bad "--fail-on none: expected verdict breaking, got: $(printf '%s' "$json" | head -c 120)"
+fi
+rm -rf "$repo"
+
+# 14b) An unknown or missing --fail-on value is a usage error.
+out=$("$ZC" --fail-on sometimes 2>&1)
+rc=$?
+assert_eq "$rc" 64 "--fail-on: unknown value exits 64"
+assert_contains "$out" "invalid --fail-on value 'sometimes'" "--fail-on: names the rejected value"
+out=$("$ZC" --fail-on 2>&1)
+rc=$?
+assert_eq "$rc" 64 "--fail-on: missing value exits 64"
+assert_contains "$out" "'--fail-on' needs a value" "--fail-on: explains the missing value"
+
+# 14c) Breakage confined to a dependency passes --fail-on api-breaking: the public API
+#      is untouched, so a consumer's API gate must not fail on it.
+repo=$(new_pubdep_repo 'bar = { path = "../bar", version = "0.1" }' $'fn helper() -> Result<(), bar::Error> { Ok(()) }\npub fn f() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(bump_pubdep_head "$repo" 'bar = { path = "../bar", version = "0.2" }')
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
+rc=$?
+assert_eq "$rc" 1 "dep-only break: the default mode exits 1"
+if printf '%s' "$json" | jq -e '.totals.dep_breaking >= 1 and .totals.api_breaking == 0 and .totals.public_dep_breaking == 0' >/dev/null 2>&1; then
+    ok "dep-only break: the fixture breaks only through a dependency"
+else
+    bad "dep-only break: expected dep-only totals, got: $(printf '%s' "$json" | jq -c '.totals' 2>/dev/null)"
+fi
+out=$(cd "$repo" && "$ZC" --fail-on api-breaking "$base" "$head" 2>&1)
+rc=$?
+assert_eq "$rc" 0 "dep-only break: --fail-on api-breaking exits 0"
+assert_contains "$out" "BREAKING" "dep-only break: --fail-on api-breaking still reports it"
+rm -rf "$repo"
+
+# 14d) An analysis error keeps exiting 2 under --fail-on error, and 0 only under none.
+repo=$(new_repo 'pub fn foo() {}')
+base=$(git -C "$repo" rev-parse HEAD)
+head=$(commit_lib "$repo" $'compile_error!("zc fixture build failure");\npub fn foo() {}' 'break docs')
+out=$(cd "$repo" && "$ZC" --fail-on error "$base" "$head" 2>&1)
+rc=$?
+assert_eq "$rc" 2 "--fail-on error: analysis error exits 2"
+out=$(cd "$repo" && "$ZC" --fail-on none "$base" "$head" 2>&1)
+rc=$?
+assert_eq "$rc" 0 "--fail-on none: analysis error exits 0"
+assert_contains "$out" "ERROR" "--fail-on none: the analysis error is still reported"
+rm -rf "$repo"
+
 # 15) --report writes the --json document to a file while stdout keeps the human report.
 repo=$(new_repo 'pub fn foo() {}')
 base=$(git -C "$repo" rev-parse HEAD)

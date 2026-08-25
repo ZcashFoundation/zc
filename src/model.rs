@@ -26,6 +26,56 @@ pub enum GroupMode {
     Flat,
 }
 
+/// Which findings make the run exit non-zero.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FailOn {
+    /// Any breaking change, or an analysis error.
+    Breaking,
+    /// A public API break or a public-dependency break, or an analysis error.
+    ApiBreaking,
+    /// An analysis error only.
+    Error,
+    /// Nothing.
+    None,
+}
+
+impl FailOn {
+    pub fn parse(value: &str) -> Option<FailOn> {
+        match value {
+            "breaking" => Some(FailOn::Breaking),
+            "api-breaking" => Some(FailOn::ApiBreaking),
+            "error" => Some(FailOn::Error),
+            "none" => Some(FailOn::None),
+            _ => None,
+        }
+    }
+
+    /// Exit code for a finished analysis under this policy.
+    pub fn exit_code(self, report: &Report) -> i32 {
+        let verdict = report.verdict();
+        match self {
+            FailOn::Breaking => verdict.exit_code(),
+            FailOn::ApiBreaking => {
+                if verdict == Verdict::Error {
+                    EXIT_ANALYSIS
+                } else if report.api_breaking() + report.pubdep_break_total > 0 {
+                    EXIT_BREAKING
+                } else {
+                    EXIT_OK
+                }
+            }
+            FailOn::Error => {
+                if verdict == Verdict::Error {
+                    EXIT_ANALYSIS
+                } else {
+                    EXIT_OK
+                }
+            }
+            FailOn::None => EXIT_OK,
+        }
+    }
+}
+
 /// Command-line options.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -34,6 +84,7 @@ pub struct Options {
     pub json_mode: bool,
     pub changelog_mode: bool,
     pub group_mode: GroupMode,
+    pub fail_on: FailOn,
     /// Path the JSON report is written to, in addition to the selected stdout output.
     pub report_path: Option<PathBuf>,
 }
@@ -407,3 +458,7 @@ impl Report {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "model/tests.rs"]
+mod tests;
