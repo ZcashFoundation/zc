@@ -17,6 +17,12 @@ if [ ! -x "$ZC" ]; then
     echo "error: no zc binary at $ZC (run: cargo build --release)" >&2
     exit 64
 fi
+
+# A GitHub Actions runner exports these for every step, including this one.
+# Unset them so the cases below see a local environment by default; the
+# GitHub Actions cases (16) set them explicitly on the invocation.
+unset GITHUB_ACTIONS GITHUB_STEP_SUMMARY
+
 pass=0
 fail=0
 
