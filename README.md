@@ -56,11 +56,11 @@ steps:
       fail-on: breaking
 ```
 
-The action installs the `cargo-public-api` and Rust nightly versions tested with that `zc` release. It compares the pull request head with its branch point from the baseline, then fails with the same exit-code contract as the CLI. Set `head` when both refs must be compared literally, or enable `with-lock` and `with-values` for the optional analyses.
+The action installs the `cargo-public-api` and Rust nightly versions tested with that `zc` release. It compares the pull request head with its branch point from the baseline, then fails with the same exit-code contract as the CLI. Set `head` when both refs must be compared literally, or enable `with-lock` and `with-values` for the optional analyses. `with-changelog` adds a Keep a Changelog draft for a later step to read.
 
 `fail-on` chooses which findings fail the step: `breaking` (the default), `api-breaking` to let dependency, value, and doc changes pass, `error` for analysis failures only, or `none`. Findings are reported the same way in every mode.
 
-The step sets two outputs: `verdict` (`ok`, `breaking`, or `error`) and `report`, the path of the JSON report, so a later step can read `${{ steps.api.outputs.verdict }}` or parse the full document. Inside Actions, `zc` also annotates the run and writes a summary of the verdict, totals, and per-crate counts to the job summary.
+The step sets three outputs: `verdict` (`ok`, `breaking`, or `error`), `report`, the path of the JSON report, and `changelog`, the path of the Keep a Changelog draft. A later step can read `${{ steps.api.outputs.verdict }}` or parse the full document. `changelog` is empty unless `with-changelog` is enabled and the analysis produced a draft. Inside Actions, `zc` also annotates the run and writes a summary of the verdict, totals, and per-crate counts to the job summary.
 
 Pin the action to a full commit SHA when the workflow requires an immutable dependency.
 

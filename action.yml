@@ -26,6 +26,10 @@ inputs:
     description: Include public const, static value, and documentation changes
     required: false
     default: "false"
+  with-changelog:
+    description: Also write a Keep a Changelog draft, exposed as the changelog output
+    required: false
+    default: "false"
   fail-on:
     description: Findings that fail the step (breaking, api-breaking, error, or none)
     required: false
@@ -38,6 +42,9 @@ outputs:
   report:
     description: Absolute path of the JSON report file
     value: ${{ steps.check.outputs.report }}
+  changelog:
+    description: Absolute path of the Keep a Changelog markdown file, empty unless with-changelog drafted one
+    value: ${{ steps.check.outputs.changelog }}
 
 runs:
   using: composite
@@ -69,6 +76,7 @@ runs:
         INPUT_HEAD: ${{ inputs.head }}
         INPUT_WITH_LOCK: ${{ inputs.with-lock }}
         INPUT_WITH_VALUES: ${{ inputs.with-values }}
+        INPUT_WITH_CHANGELOG: ${{ inputs.with-changelog }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         RUSTUP_TOOLCHAIN: nightly-2026-07-18
         ZC_TOOLCHAIN: nightly-2026-07-18
@@ -107,6 +115,20 @@ runs:
         rm -f "$report"
         arguments+=(--report "$report")
 
+        changelog=""
+        case "$INPUT_WITH_CHANGELOG" in
+          true)
+            changelog=$RUNNER_TEMP/zc-changelog.md
+            rm -f "$changelog"
+            arguments+=(--changelog-file "$changelog")
+            ;;
+          false) ;;
+          *)
+            echo "::error title=Invalid with-changelog input::Expected true or false."
+            exit 64
+            ;;
+        esac
+
         arguments+=("$INPUT_BASELINE")
         if [[ -n "$INPUT_HEAD" ]]; then
           arguments+=("$INPUT_HEAD")
@@ -119,9 +141,12 @@ runs:
         if [[ -f "$report" ]]; then
           verdict=$(jq -r '.verdict' "$report")
         fi
+        # An analysis error leaves no changelog behind, so the output must not name one.
+        [[ -f "$changelog" ]] || changelog=""
         {
           echo "verdict=$verdict"
           echo "report=$report"
+          echo "changelog=$changelog"
         } >>"$GITHUB_OUTPUT"
 
         exit "$status"
