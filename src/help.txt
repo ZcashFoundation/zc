@@ -125,6 +125,17 @@ OPTIONS
                    Error `stage` is baseline_build, head_build, or diff.
                    zc keeps --all-features and does not automatically fall
                    back to default features because that can hide public API.
+  --report <path>  Also write the --json document to <path>, keeping the
+                   selected output on stdout. The directory must already exist.
+  --fail-on <what> Which findings exit non-zero (default: breaking):
+                     breaking      any breaking change, or an analysis error.
+                     api-breaking  a public API or public-dependency break, or
+                                   an analysis error. Dependency, value, and
+                                   doc changes are still reported, but exit 0.
+                     error         an analysis error only.
+                     none          nothing.
+                   The verdict and the report are identical in every mode;
+                   only the exit status changes.
 
 EXAMPLES
   zc                     # if dirty: HEAD -> working tree
@@ -136,6 +147,8 @@ EXAMPLES
   zc --with-lock         # include transitive Cargo.lock diff
   zc --with-values main  # also flag const/static value + doc changes
   zc --json main         # machine-readable output for CI
+  zc --report r.json     # also write the JSON report to a file
+  zc --fail-on none      # report everything, never fail the run
 
 OUTPUT
   Sections are printed in order:
@@ -176,8 +189,17 @@ ENVIRONMENT
                      Defaults to the first installed `nightly*` toolchain.
   NO_COLOR           When set to any non-empty value, disables ANSI
                      color output (https://no-color.org).
+  GITHUB_ACTIONS     When set to "true", zc also writes workflow-command
+                     annotations for the final result to stderr, at the
+                     severity --fail-on gives them.
+  GITHUB_STEP_SUMMARY
+                     File the job summary (verdict, totals, and per-crate
+                     counts) is appended to.
 
 EXIT CODES
+  --fail-on selects which findings reach codes 1 and 2; the codes themselves
+  do not change.
+
   0   Clean. No breaking API, dependency, or value changes were found.
   1   Breaking changes were detected.
   2   Analysis error. zc could not produce a trustworthy verdict because

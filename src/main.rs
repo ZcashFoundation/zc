@@ -13,6 +13,7 @@ mod changelog_out;
 mod ctx;
 mod deps;
 mod git;
+mod github;
 mod group;
 mod json;
 mod lock;
@@ -20,16 +21,18 @@ mod model;
 mod progress;
 mod pubdep;
 mod render;
+mod report_file;
 mod style;
 mod traitmap;
 mod values;
 mod version_req;
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use ctx::Ctx;
-use model::{GroupMode, Options, Refs, EXIT_ANALYSIS, EXIT_BREAKING, EXIT_OK, EXIT_USAGE};
+use model::{FailOn, GroupMode, Options, Refs, Report, EXIT_ANALYSIS, EXIT_OK, EXIT_USAGE};
 use progress::Progress;
 use style::Style;
 
@@ -59,6 +62,8 @@ fn parse_args(argv: Vec<String>, style: &Style) -> Result<Args, (String, i32)> {
         json_mode: false,
         changelog_mode: false,
         group_mode: GroupMode::Mod,
+        fail_on: FailOn::Breaking,
+        report_path: None,
     };
     let mut positional = Vec::new();
     let mut it = argv.into_iter();
@@ -72,6 +77,28 @@ fn parse_args(argv: Vec<String>, style: &Style) -> Result<Args, (String, i32)> {
             "--with-values" => opts.with_values = true,
             "--json" => opts.json_mode = true,
             "--changelog" => opts.changelog_mode = true,
+            "--fail-on" => {
+                let Some(value) = it.next() else {
+                    return Err((missing_value(style, "--fail-on"), EXIT_USAGE));
+                };
+                let Some(fail_on) = FailOn::parse(&value) else {
+                    return Err((
+                        format!(
+                            "{}error:{} invalid --fail-on value '{value}', expected breaking, \
+                             api-breaking, error, or none (run with --help for usage)",
+                            style.red, style.reset
+                        ),
+                        EXIT_USAGE,
+                    ));
+                };
+                opts.fail_on = fail_on;
+            }
+            "--report" => {
+                let Some(path) = it.next() else {
+                    return Err((missing_value(style, "--report"), EXIT_USAGE));
+                };
+                opts.report_path = Some(PathBuf::from(path));
+            }
             "--" => {
                 positional.extend(it);
                 break;
@@ -105,6 +132,21 @@ fn parse_args(argv: Vec<String>, style: &Style) -> Result<Args, (String, i32)> {
     Ok(Args { opts, positional })
 }
 
+fn missing_value(style: &Style, option: &str) -> String {
+    format!(
+        "{}error:{} '{option}' needs a value (run with --help for usage)",
+        style.red, style.reset
+    )
+}
+
+/// Emit the GitHub Actions view of the finished analysis and apply the exit-code policy.
+fn finish(ctx: &Ctx, report: &Report) -> i32 {
+    if github::is_active() {
+        github::emit(report, ctx.opts.fail_on);
+    }
+    ctx.opts.fail_on.exit_code(report)
+}
+
 fn run() -> Result<i32, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // Style for pre-parse diagnostics: assume a document mode only once we know.
@@ -123,6 +165,16 @@ fn run() -> Result<i32, String> {
     let opts = args.opts;
     let document_mode = opts.json_mode || opts.changelog_mode;
     let style = Style::detect(document_mode);
+
+    if let Some(path) = &opts.report_path {
+        if let Err(message) = report_file::check_dir(path) {
+            eprintln!(
+                "{}error:{} {message} (run with --help for usage)",
+                style.red, style.reset
+            );
+            return Ok(EXIT_USAGE);
+        }
+    }
 
     // ── ref resolution ────────────────────────────────────────────────
     let positional = args.positional;
@@ -414,6 +466,11 @@ fn run() -> Result<i32, String> {
         pubdep_review_total,
     };
 
+    if let Some(path) = &ctx.opts.report_path {
+        report_file::write(path, &json::emit(&report))
+            .map_err(|e| format!("{}error:{} {e}", ctx.style.red, ctx.style.reset))?;
+    }
+
     // ── summary ───────────────────────────────────────────────────────
     if !document_mode {
         render::summary(&ctx, &report);
@@ -447,16 +504,15 @@ fn run() -> Result<i32, String> {
                 report.deps.breaking,
                 ctx.style.reset
             );
-            return Ok(EXIT_BREAKING);
         }
-        return Ok(EXIT_OK);
+        return Ok(finish(&ctx, &report));
     }
 
     // ── changelog document ────────────────────────────────────────────
     if ctx.opts.changelog_mode {
         if report.error_crate_count > 0 {
             render::api_errors(&ctx, &report);
-            return Ok(EXIT_ANALYSIS);
+            return Ok(finish(&ctx, &report));
         }
         let base = cargo_meta::dump_per_crate_deps(&ctx, &ctx.refs.baseline_sha).map_err(|_| {
             format!(
@@ -484,7 +540,7 @@ fn run() -> Result<i32, String> {
     // ── JSON document ─────────────────────────────────────────────────
     if ctx.opts.json_mode {
         println!("{}", json::emit(&report));
-        return Ok(report.verdict().exit_code());
+        return Ok(finish(&ctx, &report));
     }
 
     // ── detailed diffs ────────────────────────────────────────────────
@@ -500,12 +556,8 @@ fn run() -> Result<i32, String> {
     println!();
     if report.error_crate_count > 0 {
         render::api_errors(&ctx, &report);
-        return Ok(EXIT_ANALYSIS);
+        return Ok(finish(&ctx, &report));
     }
     render::verdict(&ctx, &report);
-    Ok(if report.any_breaking() {
-        EXIT_BREAKING
-    } else {
-        EXIT_OK
-    })
+    Ok(finish(&ctx, &report))
 }

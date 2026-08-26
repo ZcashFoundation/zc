@@ -45,13 +45,15 @@ pub fn diff(base: &BTreeMap<String, DepRecord>, head: &BTreeMap<String, DepRecor
     for (name, old) in base {
         let Some(new) = head.get(name) else {
             let label = kind_label(old.kind, old.optional);
-            if label == "runtime" {
+            let breaking = label == "runtime";
+            if breaking {
                 result.breaking += 1;
             }
             result.removed.push(DepRemoved {
                 name: name.clone(),
                 version: old.ver.clone(),
                 kind: label,
+                breaking,
             });
             continue;
         };
@@ -75,9 +77,9 @@ pub fn diff(base: &BTreeMap<String, DepRecord>, head: &BTreeMap<String, DepRecor
             &new.features,
         );
 
-        if label == "runtime"
-            && (bump == Bump::Major || features.split(',').any(|token| token.starts_with('-')))
-        {
+        let breaking = label == "runtime"
+            && (bump == Bump::Major || features.split(',').any(|token| token.starts_with('-')));
+        if breaking {
             result.breaking += 1;
         }
 
@@ -88,6 +90,7 @@ pub fn diff(base: &BTreeMap<String, DepRecord>, head: &BTreeMap<String, DepRecor
             bump,
             kind: label,
             features,
+            breaking,
         });
     }
 
