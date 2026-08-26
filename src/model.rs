@@ -92,6 +92,9 @@ pub struct Options {
     pub fail_on: FailOn,
     /// Path the JSON report is written to, in addition to the selected stdout output.
     pub report_path: Option<PathBuf>,
+    /// Path the Keep a Changelog document is written to, in addition to the selected
+    /// stdout output.
+    pub changelog_path: Option<PathBuf>,
 }
 
 /// The two ends of the comparison, fully resolved.

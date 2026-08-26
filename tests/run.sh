@@ -1073,6 +1073,37 @@ rc=$?
 assert_eq "$rc" 64 "--report: missing value exits 64"
 assert_contains "$out" "'--report' needs a value" "--report: explains the missing value"
 
+# 15c) --changelog-file writes the --changelog document to a file while stdout keeps
+#      whatever the run was asked for, and composes with --report and --fail-on.
+changelog_dir=$(mktemp -d)
+plain=$(cd "$repo" && "$ZC" "$base" "$head" 2>/dev/null)
+out=$(cd "$repo" && "$ZC" --changelog-file "$changelog_dir/notes.md" "$base" "$head" 2>/dev/null)
+rc=$?
+assert_eq "$rc" 1 "--changelog-file: the exit-code contract is unchanged"
+assert_eq "$out" "$plain" "--changelog-file: stdout keeps the human report"
+changelog=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
+assert_contains "$changelog" "## zc_fixture" "--changelog-file: the fixture drafts a changelog"
+assert_eq "$(cat "$changelog_dir/notes.md")" "$changelog" "--changelog-file: the file holds the --changelog document"
+out=$(cd "$repo" && "$ZC" --changelog --changelog-file "$changelog_dir/both.md" "$base" "$head" 2>/dev/null)
+assert_eq "$(cat "$changelog_dir/both.md")" "$out" "--changelog-file: combines with --changelog"
+out=$(cd "$repo" && "$ZC" --fail-on none --report "$changelog_dir/report.json" --changelog-file "$changelog_dir/with-report.md" "$base" "$head" 2>/dev/null)
+rc=$?
+assert_eq "$rc" 0 "--changelog-file: --fail-on still selects the exit status"
+assert_eq "$(cat "$changelog_dir/with-report.md")" "$changelog" "--changelog-file: combines with --report"
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
+assert_eq "$(cat "$changelog_dir/report.json")" "$json" "--changelog-file: the JSON report is unaffected"
+rm -rf "$changelog_dir"
+
+# 15d) A missing changelog directory is rejected before any analysis runs.
+out=$(cd "$repo" && "$ZC" --changelog-file /nonexistent-zc-dir/notes.md "$base" "$head" 2>&1)
+rc=$?
+assert_eq "$rc" 64 "--changelog-file: a missing directory exits 64"
+assert_contains "$out" "changelog directory '/nonexistent-zc-dir' does not exist" "--changelog-file: names the missing directory"
+out=$("$ZC" --changelog-file 2>&1)
+rc=$?
+assert_eq "$rc" 64 "--changelog-file: missing value exits 64"
+assert_contains "$out" "'--changelog-file' needs a value" "--changelog-file: explains the missing value"
+
 # 16) Inside GitHub Actions, the final result is annotated on stderr and summarized in
 #     the step summary file. Stdout stays the report a human reads.
 summary_file=$(mktemp)

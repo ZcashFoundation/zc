@@ -127,6 +127,9 @@ OPTIONS
                    back to default features because that can hide public API.
   --report <path>  Also write the --json document to <path>, keeping the
                    selected output on stdout. The directory must already exist.
+  --changelog-file <path>
+                   Also write the --changelog document to <path>, keeping the
+                   selected output on stdout. The directory must already exist.
   --fail-on <what> Which findings exit non-zero (default: breaking):
                      breaking      any breaking change, or an analysis error.
                      api-breaking  a public API or public-dependency break, or
@@ -148,6 +151,7 @@ EXAMPLES
   zc --with-values main  # also flag const/static value + doc changes
   zc --json main         # machine-readable output for CI
   zc --report r.json     # also write the JSON report to a file
+  zc --changelog-file c.md # also write the changelog draft to a file
   zc --fail-on none      # report everything, never fail the run
 
 OUTPUT

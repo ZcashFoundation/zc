@@ -111,6 +111,7 @@ zc --json main           # machine-readable output for CI
 zc --report zc.json main # also write the JSON report to a file
 zc --fail-on none main   # report every finding without failing the run
 zc --changelog main      # draft a Keep a Changelog changelog (markdown)
+zc --changelog-file c.md main # also write that draft to a file
 zc --version             # print the installed version
 ```
 
@@ -201,6 +202,11 @@ crate, with `### Added` / `### Changed` / `### Removed` lists.
 It's a *draft* — review and curate before committing. Needs a `nightly`
 toolchain for the trait attribution (without one it falls back to plain
 type grouping).
+
+`--changelog-file <path>` writes that same document to a file in any mode, so a
+run can keep the human report or the JSON on stdout and still hand the draft to
+another step. The changelog directory must already exist. An analysis error
+leaves no draft: the crates that failed would be missing from it.
 
 Keep a Changelog fixes the sections and their order; it does not say which changes
 deserve an entry. Curation does: a bug fix or a semantic change that zc's signature
