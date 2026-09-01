@@ -56,11 +56,11 @@ steps:
       fail-on: breaking
 ```
 
-The action installs the `cargo-public-api` and Rust nightly versions tested with that `zc` release. It compares the pull request head with its branch point from the baseline, then fails with the same exit-code contract as the CLI. Set `head` when both refs must be compared literally, or enable `with-lock` and `with-values` for the optional analyses.
+The action installs the `cargo-public-api` and Rust nightly versions tested with that `zc` release. It compares the pull request head with its branch point from the baseline, then fails with the same exit-code contract as the CLI. Set `head` when both refs must be compared literally, or enable `with-lock` and `with-values` for the optional analyses. `with-changelog` adds a Keep a Changelog draft for a later step to read.
 
 `fail-on` chooses which findings fail the step: `breaking` (the default), `api-breaking` to let dependency, value, and doc changes pass, `error` for analysis failures only, or `none`. Findings are reported the same way in every mode.
 
-The step sets two outputs: `verdict` (`ok`, `breaking`, or `error`) and `report`, the path of the JSON report, so a later step can read `${{ steps.api.outputs.verdict }}` or parse the full document. Inside Actions, `zc` also annotates the run and writes a summary of the verdict, totals, and per-crate counts to the job summary.
+The step sets three outputs: `verdict` (`ok`, `breaking`, or `error`), `report`, the path of the JSON report, and `changelog`, the path of the Keep a Changelog draft. A later step can read `${{ steps.api.outputs.verdict }}` or parse the full document. Neither path output ever names a file that does not exist: `report` is empty when the run failed before writing one, and `changelog` is empty unless `with-changelog` is enabled and the analysis produced a draft. Inside Actions, `zc` also annotates the run and writes a summary of the verdict, totals, and per-crate counts to the job summary.
 
 Pin the action to a full commit SHA when the workflow requires an immutable dependency.
 
@@ -111,6 +111,7 @@ zc --json main           # machine-readable output for CI
 zc --report zc.json main # also write the JSON report to a file
 zc --fail-on none main   # report every finding without failing the run
 zc --changelog main      # draft a Keep a Changelog changelog (markdown)
+zc --changelog-file c.md main # also write that draft to a file
 zc --version             # print the installed version
 ```
 
@@ -201,6 +202,14 @@ crate, with `### Added` / `### Changed` / `### Removed` lists.
 It's a *draft* — review and curate before committing. Needs a `nightly`
 toolchain for the trait attribution (without one it falls back to plain
 type grouping).
+
+`--changelog-file <path>` writes that same document to a file in any mode, so a
+run can keep the human report or the JSON on stdout and still hand the draft to
+another step. The changelog directory must already exist, and the destination is
+cleared when the run starts. An analysis error leaves no draft: the crates that
+failed would be missing from it, and clearing is what keeps that true when an
+earlier run already wrote one — otherwise `--fail-on none` would exit 0 over a
+stale file.
 
 Keep a Changelog fixes the sections and their order; it does not say which changes
 deserve an entry. Curation does: a bug fix or a semantic change that zc's signature

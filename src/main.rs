@@ -18,10 +18,10 @@ mod group;
 mod json;
 mod lock;
 mod model;
+mod out_file;
 mod progress;
 mod pubdep;
 mod render;
-mod report_file;
 mod style;
 mod traitmap;
 mod values;
@@ -64,6 +64,7 @@ fn parse_args(argv: Vec<String>, style: &Style) -> Result<Args, (String, i32)> {
         group_mode: GroupMode::Mod,
         fail_on: FailOn::Breaking,
         report_path: None,
+        changelog_path: None,
     };
     let mut positional = Vec::new();
     let mut it = argv.into_iter();
@@ -98,6 +99,12 @@ fn parse_args(argv: Vec<String>, style: &Style) -> Result<Args, (String, i32)> {
                     return Err((missing_value(style, "--report"), EXIT_USAGE));
                 };
                 opts.report_path = Some(PathBuf::from(path));
+            }
+            "--changelog-file" => {
+                let Some(path) = it.next() else {
+                    return Err((missing_value(style, "--changelog-file"), EXIT_USAGE));
+                };
+                opts.changelog_path = Some(PathBuf::from(path));
             }
             "--" => {
                 positional.extend(it);
@@ -139,6 +146,30 @@ fn missing_value(style: &Style, option: &str) -> String {
     )
 }
 
+/// Render the Keep a Changelog document for a finished analysis.
+fn changelog_document(ctx: &Ctx, report: &Report) -> Result<String, String> {
+    let base = cargo_meta::dump_per_crate_deps(ctx, &ctx.refs.baseline_sha).map_err(|_| {
+        format!(
+            "{}error:{} could not read per-crate dependencies at baseline ({})",
+            ctx.style.red, ctx.style.reset, ctx.refs.baseline_sha
+        )
+    })?;
+    let head = cargo_meta::dump_per_crate_deps(ctx, &ctx.refs.head_sha).map_err(|_| {
+        format!(
+            "{}error:{} could not read per-crate dependencies at head ({})",
+            ctx.style.red, ctx.style.reset, ctx.refs.head_sha
+        )
+    })?;
+    if base.is_empty() || head.is_empty() {
+        return Err(format!(
+            "{}error:{} per-crate dependency dump was empty for one side (baseline={}, \
+             head={}); refusing to emit a degenerate diff",
+            ctx.style.red, ctx.style.reset, ctx.refs.baseline_sha, ctx.refs.head_sha
+        ));
+    }
+    Ok(changelog_out::emit(ctx, report, &base, &head))
+}
+
 /// Emit the GitHub Actions view of the finished analysis and apply the exit-code policy.
 fn finish(ctx: &Ctx, report: &Report) -> i32 {
     if github::is_active() {
@@ -166,8 +197,12 @@ fn run() -> Result<i32, String> {
     let document_mode = opts.json_mode || opts.changelog_mode;
     let style = Style::detect(document_mode);
 
-    if let Some(path) = &opts.report_path {
-        if let Err(message) = report_file::check_dir(path) {
+    for (label, path) in [
+        ("report", &opts.report_path),
+        ("changelog", &opts.changelog_path),
+    ] {
+        let Some(path) = path else { continue };
+        if let Err(message) = out_file::prepare(label, path) {
             eprintln!(
                 "{}error:{} {message} (run with --help for usage)",
                 style.red, style.reset
@@ -467,7 +502,22 @@ fn run() -> Result<i32, String> {
     };
 
     if let Some(path) = &ctx.opts.report_path {
-        report_file::write(path, &json::emit(&report))
+        out_file::write("report", path, &json::emit(&report))
+            .map_err(|e| format!("{}error:{} {e}", ctx.style.red, ctx.style.reset))?;
+    }
+
+    // An analysis error produces no draft: the crates that failed would be missing from it.
+    let changelog = if ctx.opts.changelog_mode || ctx.opts.changelog_path.is_some() {
+        if report.error_crate_count > 0 {
+            None
+        } else {
+            Some(changelog_document(&ctx, &report)?)
+        }
+    } else {
+        None
+    };
+    if let (Some(path), Some(document)) = (&ctx.opts.changelog_path, &changelog) {
+        out_file::write("changelog", path, document)
             .map_err(|e| format!("{}error:{} {e}", ctx.style.red, ctx.style.reset))?;
     }
 
@@ -510,30 +560,11 @@ fn run() -> Result<i32, String> {
 
     // ── changelog document ────────────────────────────────────────────
     if ctx.opts.changelog_mode {
-        if report.error_crate_count > 0 {
+        let Some(document) = &changelog else {
             render::api_errors(&ctx, &report);
             return Ok(finish(&ctx, &report));
-        }
-        let base = cargo_meta::dump_per_crate_deps(&ctx, &ctx.refs.baseline_sha).map_err(|_| {
-            format!(
-                "{}error:{} could not read per-crate dependencies at baseline ({})",
-                ctx.style.red, ctx.style.reset, ctx.refs.baseline_sha
-            )
-        })?;
-        let head = cargo_meta::dump_per_crate_deps(&ctx, &ctx.refs.head_sha).map_err(|_| {
-            format!(
-                "{}error:{} could not read per-crate dependencies at head ({})",
-                ctx.style.red, ctx.style.reset, ctx.refs.head_sha
-            )
-        })?;
-        if base.is_empty() || head.is_empty() {
-            return Err(format!(
-                "{}error:{} per-crate dependency dump was empty for one side (baseline={}, \
-                 head={}); refusing to emit a degenerate diff",
-                ctx.style.red, ctx.style.reset, ctx.refs.baseline_sha, ctx.refs.head_sha
-            ));
-        }
-        print!("{}", changelog_out::emit(&ctx, &report, &base, &head));
+        };
+        print!("{document}");
         return Ok(EXIT_OK);
     }
 
@@ -561,3 +592,7 @@ fn run() -> Result<i32, String> {
     render::verdict(&ctx, &report);
     Ok(finish(&ctx, &report))
 }
+
+#[cfg(test)]
+#[path = "main/tests.rs"]
+mod tests;
