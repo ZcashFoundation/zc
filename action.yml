@@ -27,7 +27,10 @@ inputs:
     required: false
     default: "false"
   with-changelog:
-    description: Also write a Keep a Changelog draft, exposed as the changelog output
+    description: >-
+      Also write a Keep a Changelog draft, exposed as the changelog output. Drafting dumps every
+      crate's dependencies at both revisions, so it costs that on every run, including runs with
+      no API change.
     required: false
     default: "false"
   fail-on:
@@ -40,7 +43,7 @@ outputs:
     description: ok, breaking, or error
     value: ${{ steps.check.outputs.verdict }}
   report:
-    description: Absolute path of the JSON report file
+    description: Absolute path of the JSON report file, empty if the run produced none
     value: ${{ steps.check.outputs.report }}
   changelog:
     description: Absolute path of the Keep a Changelog markdown file, empty unless with-changelog drafted one
@@ -141,7 +144,9 @@ runs:
         if [[ -f "$report" ]]; then
           verdict=$(jq -r '.verdict' "$report")
         fi
-        # An analysis error leaves no changelog behind, so the output must not name one.
+        # Neither output may name a file that does not exist: an analysis error leaves no
+        # changelog behind, and a run that fails before writing leaves no report.
+        [[ -f "$report" ]] || report=""
         [[ -f "$changelog" ]] || changelog=""
         {
           echo "verdict=$verdict"
