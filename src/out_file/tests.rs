@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{check_dir, write};
+use super::{prepare, write};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("zc-report-{}-{name}", std::process::id()));
@@ -46,20 +46,37 @@ fn a_missing_directory_is_rejected_before_the_analysis() {
     let missing = dir.join("nested");
 
     assert_eq!(
-        check_dir("report", &missing.join("report.json")),
+        prepare("report", &missing.join("report.json")),
         Err(format!(
             "report directory '{}' does not exist",
             missing.display()
         ))
     );
-    assert_eq!(check_dir("report", &dir.join("report.json")), Ok(()));
+    assert_eq!(prepare("report", &dir.join("report.json")), Ok(()));
+
+    fs::remove_dir_all(&dir).expect("the scratch directory is removable");
+}
+
+#[test]
+fn preparing_clears_a_document_left_by_an_earlier_run() {
+    let dir = scratch("stale");
+    let path = dir.join("changelog.md");
+
+    write("changelog", &path, "## crate\n\n### Added\n").expect("the directory exists");
+    assert_eq!(prepare("changelog", &path), Ok(()));
+    assert!(
+        !path.exists(),
+        "a run that produces no document must not leave the previous one behind"
+    );
+    // Idempotent: the second run has nothing to clear.
+    assert_eq!(prepare("changelog", &path), Ok(()));
 
     fs::remove_dir_all(&dir).expect("the scratch directory is removable");
 }
 
 #[test]
 fn a_bare_file_name_writes_into_the_current_directory() {
-    assert_eq!(check_dir("report", Path::new("report.json")), Ok(()));
+    assert_eq!(prepare("report", Path::new("zc-nonexistent.json")), Ok(()));
 }
 
 #[test]
@@ -68,7 +85,7 @@ fn the_label_names_the_document_in_both_diagnostics() {
     let missing = dir.join("nested");
 
     assert_eq!(
-        check_dir("changelog", &missing.join("changelog.md")),
+        prepare("changelog", &missing.join("changelog.md")),
         Err(format!(
             "changelog directory '{}' does not exist",
             missing.display()

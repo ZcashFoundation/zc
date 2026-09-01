@@ -202,7 +202,7 @@ fn run() -> Result<i32, String> {
         ("changelog", &opts.changelog_path),
     ] {
         let Some(path) = path else { continue };
-        if let Err(message) = out_file::check_dir(label, path) {
+        if let Err(message) = out_file::prepare(label, path) {
             eprintln!(
                 "{}error:{} {message} (run with --help for usage)",
                 style.red, style.reset

@@ -1104,6 +1104,27 @@ rc=$?
 assert_eq "$rc" 64 "--changelog-file: missing value exits 64"
 assert_contains "$out" "'--changelog-file' needs a value" "--changelog-file: explains the missing value"
 
+# 15e) A run that drafts nothing clears the destination instead of leaving the previous
+#      run's draft behind. --fail-on none makes that run exit 0, so a stale file would be
+#      read as this run's answer.
+stale_repo=$(new_repo 'pub fn foo() {}')
+stale_base=$(git -C "$stale_repo" rev-parse HEAD)
+stale_head=$(commit_lib "$stale_repo" 'pub fn bar() {}' 'swap')
+stale_dir=$(mktemp -d)
+(cd "$stale_repo" && "$ZC" --changelog-file "$stale_dir/notes.md" "$stale_base" "$stale_head" >/dev/null 2>&1)
+assert_contains "$(cat "$stale_dir/notes.md")" "## zc_fixture" "stale draft: the first run leaves a draft"
+stale_head=$(commit_lib "$stale_repo" $'compile_error!("zc fixture build failure");\npub fn foo() {}' 'break the build')
+out=$(cd "$stale_repo" && "$ZC" --fail-on none --changelog-file "$stale_dir/notes.md" "$stale_base" "$stale_head" 2>&1)
+rc=$?
+assert_eq "$rc" 0 "stale draft: --fail-on none still exits 0 on an analysis error"
+assert_contains "$out" "ERROR" "stale draft: the analysis error is still reported"
+if [ -e "$stale_dir/notes.md" ]; then
+    bad "stale draft: the failed run left the previous draft in place"
+else
+    ok "stale draft: the failed run cleared the destination"
+fi
+rm -rf "$stale_dir" "$stale_repo"
+
 # 16) Inside GitHub Actions, the final result is annotated on stderr and summarized in
 #     the step summary file. Stdout stays the report a human reads.
 summary_file=$(mktemp)

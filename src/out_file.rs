@@ -4,6 +4,7 @@
 //! words.
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 /// Directory the document is written into; a bare file name means the current directory.
@@ -14,16 +15,27 @@ fn parent_dir(path: &Path) -> PathBuf {
     }
 }
 
-/// Reject a destination whose directory is missing, before the analysis runs.
-pub fn check_dir(label: &str, path: &Path) -> Result<(), String> {
+/// Reject a destination whose directory is missing and clear a document left by an earlier
+/// run, both before the analysis starts.
+///
+/// Clearing is what makes the destination mean "this run": a run that produces no document —
+/// an analysis error yields no changelog draft — would otherwise leave the previous run's file
+/// in place for a consumer to read as current, and `--fail-on none` makes that run exit 0.
+pub fn prepare(label: &str, path: &Path) -> Result<(), String> {
     let dir = parent_dir(path);
-    if dir.is_dir() {
-        Ok(())
-    } else {
-        Err(format!(
+    if !dir.is_dir() {
+        return Err(format!(
             "{label} directory '{}' does not exist",
             dir.display()
-        ))
+        ));
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!(
+            "failed to clear the previous {label} '{}': {err}",
+            path.display()
+        )),
     }
 }
 

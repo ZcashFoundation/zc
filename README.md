@@ -205,8 +205,11 @@ type grouping).
 
 `--changelog-file <path>` writes that same document to a file in any mode, so a
 run can keep the human report or the JSON on stdout and still hand the draft to
-another step. The changelog directory must already exist. An analysis error
-leaves no draft: the crates that failed would be missing from it.
+another step. The changelog directory must already exist, and the destination is
+cleared when the run starts. An analysis error leaves no draft: the crates that
+failed would be missing from it, and clearing is what keeps that true when an
+earlier run already wrote one — otherwise `--fail-on none` would exit 0 over a
+stale file.
 
 Keep a Changelog fixes the sections and their order; it does not say which changes
 deserve an entry. Curation does: a bug fix or a semantic change that zc's signature
