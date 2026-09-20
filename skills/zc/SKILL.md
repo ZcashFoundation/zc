@@ -10,6 +10,10 @@ description: >-
 
 # Produce Keep a Changelog changelogs with zc
 
+Be laconic in chat and public prose: answer directly, without preambles,
+repetition, or unsolicited explanations. Expand only when asked or necessary
+for correctness; preserve required sections and evidence.
+
 Run `zc --changelog`, curate its draft into
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) entries, and
 **write them into the repo's `CHANGELOG.md` files**. Needs `zc` on `PATH` (plus
