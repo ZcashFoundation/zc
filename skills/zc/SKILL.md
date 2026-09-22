@@ -1,23 +1,23 @@
 ---
 name: zc
 description: >-
-  Produce Keep a Changelog CHANGELOG entries for the current branch (or a
-  given PR/branch) by running zc and writing them into the repo's CHANGELOG.md
-  files; or, with `/zc --check`, verify the existing entries against zc and report
-  discrepancies without writing. Use when the user asks to write/draft/produce or
-  check/verify a changelog for a branch or PR, or turn a zc diff into entries.
+  Produce or verify changelog entries for a branch or PR using zc's API and
+  dependency analysis. Detect the repo's source of truth first: write Changie
+  fragments for Zebra, or direct CHANGELOG.md entries in non-Changie repos.
+  `/zc --check` reports discrepancies without writing. Use when asked to
+  write/draft/produce or check/verify a changelog, or turn a zc diff into entries.
 ---
 
-# Produce Keep a Changelog changelogs with zc
+# Produce repository-native changelogs with zc
 
 Be laconic in chat and public prose: answer directly, without preambles,
 repetition, or unsolicited explanations. Expand only when asked or necessary
 for correctness; preserve required sections and evidence.
 
-Run `zc --changelog`, curate its draft into
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) entries, and
-**write them into the repo's `CHANGELOG.md` files**. Needs `zc` on `PATH` (plus
-its prereqs: `cargo-public-api`, a nightly toolchain).
+Run `zc --changelog`, curate its Markdown draft, and write to the repo's **changelog
+source**, not necessarily `CHANGELOG.md`. zc remains the API/dependency analyzer:
+`--json` or `--report <path>` provides machine-readable evidence; no YAML-output
+flag is needed. Requires `zc` on `PATH`, `cargo-public-api`, and a nightly toolchain.
 
 ## Quick start
 
@@ -28,18 +28,18 @@ zc --changelog
 ```
 
 zc prints per-crate `## <crate>` sections holding `### Added/Changed/Removed`
-bullets, paths already crate-relative and type members brace-grouped. Treat that
-output as a **draft**: place breaking changes in their natural section (step 3),
-sort into sections (step 4), reconcile against the last release (step 5), then write
-the result into the matching `CHANGELOG.md` files.
+bullets, paths already crate-relative and type members brace-grouped. Treat the
+output as a **draft**: repository policy decides categories and where to write.
+For Zebra, use `changie new -j PROJECT -k KIND -b BODY` to create fragments; never
+paste the draft into generated changelogs. See [EXAMPLES.md](EXAMPLES.md).
 
-To verify existing entries instead of writing them, use `--check` (last section): it
-reports discrepancies against zc and writes nothing, the fast pre-PR gate.
+To verify instead, invoke `/zc --check` (last section). This is a skill mode,
+not a `zc` binary flag, and writes nothing.
 
 ## What requires an entry
 
-The zc diff is the API signal, not the whole requirement. Keep a Changelog fixes the
-sections, not what belongs in them; an entry is required for:
+The zc diff is the API signal, not the whole requirement. Repository policy decides
+what belongs in a changelog; ordinarily an entry is required for:
 
 - any change to a crate's public API;
 - any bug fix;
@@ -57,185 +57,229 @@ sections, not what belongs in them; an entry is required for:
   crate's public API — the case where no signature text changed, so `cargo public-api`
   sees nothing — that same bullet carries the lockstep-upgrade note.
 
-The exception is a crate that has **never been released**: its changelog gets only
-`- Initial release!` under the version heading, with no itemized API. There is no prior
-release for a user to adapt from, so discard zc's draft for such a crate.
+For a crate that has **never been released**, follow its repository's initial-release
+convention rather than itemizing changes from an imaginary prior release. In direct
+Markdown repos using the convention below, keep only `- Initial release!`.
 
 [zebra-changelog]: https://github.com/ZcashFoundation/zebra/blob/main/book/src/dev/changelog-guidelines.md
 [dep-rationale]: https://github.com/ZcashFoundation/zebra/pull/11111#issuecomment-5097643724
 
 ## Workflow
+### 0. Find the source of truth
+- Read repository changelog policy and generator configuration before choosing a writer.
+  For Zebra, read `.changie.yaml` and `book/src/dev/changelog-guidelines.md`; for a
+  release, also read `release-plz.toml`, `.github/workflows/release.yml`, and
+  `.github/scripts/batch-release-changelogs.sh`.
+- **Zebra / Changie:** `.changes/unreleased/*.yaml` are ordinary PR inputs;
+  `.changes/<project>/v<version>.md` are batched release and historical sources.
+  `.changie.yaml` maps project `zebrad` to root `CHANGELOG.md` and library project keys
+  to their crate changelogs. Those `CHANGELOG.md` files are generated: never edit them
+  by hand. Use the configured keys, not a guessed crate directory or display label.
+- **Non-Changie:** use the repo's established direct Markdown workflow below, unless
+  another generator owns the files. Repository policy wins over generic Keep a Changelog.
+
 
 ### 1. Resolve the diff range
-- No argument means the current branch: zc diffs the committed branch against its
-  branch point with `main`. Commit work-in-progress first so the tree is clean,
-  otherwise zc diffs only the uncommitted edits.
-- A PR number or ref means that target instead: `gh pr view <N> --json
-  headRefName,headRefOid,baseRefName`. If it is checked out locally, treat it like
-  the current branch; otherwise `git fetch <remote> pull/<N>/head` and pass explicit
-  refs in step 2.
+- No argument means the current branch. On a clean tree, zc compares its branch point
+  with the parent (upstream tracking ref, falling back to `main`) to `HEAD`. On a dirty
+  tree, the default instead compares `HEAD` to working-tree edits. Do not silently use
+  that narrower range for a whole-PR changelog; pass explicit committed refs.
+- Resolve a PR with `gh pr view <N> --json headRefName,headRefOid,baseRefName`;
+  fetch its head if needed. For an ordinary PR, use its actual target branch to find
+  the merge-base, including a `maint/` target rather than assuming `main`.
+- A release uses each crate's previous published release to the exact final release-PR
+  head, not a branch point; see the release section.
 
 ### 2. Run zc
 - Current branch: `zc --changelog`.
 - Explicit refs: `zc --changelog $(git merge-base <base> <head>) <head>`.
 - zc runs a full `cargo public-api` build with `--all-features`. Run it where
   builds are fast, such as a remote build host for large workspaces.
-- Exit `1` means zc found breaking changes and can still draft a changelog.
-  Exit `2` means analysis failed for at least one crate; do not curate the
-  changelog until the reported stage, stderr, and hint are resolved.
-- An empty draft is a valid result: no public API changed, so there are no
-  `### Added`/`### Changed`/`### Removed` entries to write. A `### Fixed`,
-  `### Deprecated`, or `### Security` entry may still come from the PR (step 4).
+- With the default failure policy, exit `1` means breaking changes were found and the
+  draft is usable. Exit `2` means analysis failed; resolve the reported stage, stderr,
+  and hint before curating. Exit `64` means usage or setup failed.
+- An empty draft means no API/dependency entries were emitted, not that the PR needs
+  no entry. Behavioral, bug-fix, deprecation, and security changes can come from the PR.
 
-### 3. Place breaking changes in their natural section
-There is **no `### Breaking Changes` section** — Keep a Changelog does not define one. A breaking change lives in the section that
-names what happened; the crate's semver **major** bump (chosen by the version-bump
-step, not here) is what records that the release breaks:
-- **Removed**: removing any public item. Under `### Removed`.
-- **Changed**: a changed signature, parameter list, field, or type. Under
-  `### Changed`, as prose stating the new behavior and what callers must do —
-  "`Foo::bar` now takes a `NonZeroU8` instead of a `u8`." (see REFERENCE.md).
-- **Added**: additions stay under `### Added`, even the ones that force a major bump.
-  These look additive but break downstream — leave them under `### Added` (list
-  new variants there, e.g. `TxVersion::V6`) and let the version bump carry the break:
-  - a new variant on an enum that is **not `#[non_exhaustive]`** (exhaustive `match`es
-    stop compiling);
-  - a variant changing kind, e.g. unit to struct or tuple, on such an enum;
-  - a new public field on a struct callers build with a struct literal, when every
-    field is public and the struct is **not `#[non_exhaustive]`**;
-  - a new method on a public trait downstream code implements (a trait only this
-    crate implements, e.g. a generated server trait, is not breaking).
+### 3. Classify breaking changes by repository policy
+**Zebra:** use CLI kind `breaking`, rendered as `### Breaking Changes`. A breaking
+library addition needs **both** a `breaking` fragment explaining its impact and an
+`Added` fragment naming the capability. Examples include:
+- a new variant on an enum without `#[non_exhaustive]`;
+- a new public field on a fully public struct constructed with literals, without
+  `#[non_exhaustive]`;
+- a required method on a public trait downstream code implements.
 
-Reserve an inline **BREAKING CHANGES** marker (bold, at the start of the bullet) for
-an exceptionally disruptive change such as a wholesale database-schema migration. Use
-it rarely: do not tag every breaking bullet, and never add a `(breaking; …)`
-gloss.
+Other breaks, such as removing an API or changing a variant's shape/signature, belong
+under `breaking`, not automatically under both kinds. Judge `zebrad` breaks by operator
+impact (configuration, CLI, RPC, database compatibility), not by Rust API changes.
 
-### 4. Sort into sections
-- **Order** (Keep a Changelog): `### Added`, `### Changed`, `### Deprecated`,
-  `### Removed`, `### Fixed`, `### Security`. Include only sections with entries.
-- **Source**: zc fills `Added`/`Changed`/`Removed` from the API and dependency
-  diff. `Fixed`, `Deprecated`, and `Security` have no API signal, so take them from
-  the PR.
-- **One section per change**: when a change fits several, use the most impactful.
-  Priority: Security > Removed > Changed > Deprecated > Added > Fixed.
-- **Audience**: an entry carries only what a consumer of the public API needs in order
-  to adapt. `Added` bullets are pointers — name the item and let its `rustdoc` explain
-  it. `Changed` says what a caller must do differently. Implementation details, internal
-  refactors, test-fixture reworks, and contracts not observable through the public API
-  do not belong in a changelog at all; drop them from the draft.
-- **Tone**: plain and factual. No hyperbole ("comprehensive", "significant"),
+**Direct Markdown / generic Keep a Changelog:** absent a repository-specific breaking
+section, put removals in `Removed`, signature/behavior/type changes in `Changed`, and
+additions in `Added`, even when additive-looking changes break downstream code.
+The release process, not this skill, decides the version bump. Reserve a rare inline
+**BREAKING CHANGES** marker for an exceptionally disruptive change if that repo uses it;
+do not add a `(breaking; …)` gloss to every entry.
+
+### 4. Sort and curate
+- **Zebra order:** `Breaking Changes`, `Added`, `Changed`, `Deprecated`, `Removed`,
+  `Fixed`, `Security`. CLI kinds are `breaking`, `Added`, `Changed`, `Deprecated`,
+  `Removed`, `Fixed`, `Security`. Follow `.changie.yaml` rather than guessing YAML
+  `kind` serialization from the CLI key or rendered heading.
+- **Generic order:** `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
+  Include only sections with entries.
+- **Source:** zc supplies API/dependency evidence. Behavioral changes and fixes also
+  need PR review; an unchanged signature does not mean unchanged behavior.
+- **One distinct change per entry:** choose the most impactful category. Zebra's
+  priority is breaking > Security > Removed > Changed > Deprecated > Added > Fixed,
+  except for its required breaking-plus-Added pair. Generic policy omits breaking
+  from that priority. Do not combine independent changes or PRs into one entry.
+- **Zebra Fixed vs Changed:** use `Fixed` only when the fix is invisible to users.
+  Changed output, error messages, logs, or behavior belongs in `Changed` (or a higher
+  priority category).
+- **Audience:** library entries tell downstream callers what is new or what they must
+  do differently. `zebrad` entries describe operator-visible behavior in plain language.
+  Dependency-only bumps belong in library entries, not `zebrad`, unless they carry an
+  operator-relevant security fix. Drop internal refactors and test-only changes.
+- **Tone:** plain and factual. No hyperbole ("comprehensive", "significant"),
   marketing ("game-changing"), intensifiers ("greatly improved"), or hedging
   ("helps to", "aims to").
 
 For wording, periods, width, and brace-group layout, see [REFERENCE.md](REFERENCE.md).
 For a full draft-to-entries walkthrough, see [EXAMPLES.md](EXAMPLES.md).
 
-### 5. Reconcile with the existing `[Unreleased]` section
-An entry describes the difference between the **last released version of the crate** and
-the state your change produces — not the difference from the tool's baseline. Diffing
-starts at the branch point, so on a stacked or long-lived branch the draft can name
-interstitial states no user ever saw. Collapse them:
+### 5. Reconcile existing source entries
+An entry describes the difference between the **last released version of the crate**
+and the final change, not intermediate states no user saw. Read the relevant project's
+existing fragments, or its `[Unreleased]` entries in a direct Markdown repo:
 
-- An unreleased item this branch renames yields **one** entry, naming the final name.
-  Edit the existing `[Unreleased]` bullet in place; do not add a removal plus an addition.
-- An unreleased item this branch removes leaves **no** entry: delete the `[Unreleased]`
-  bullet that added it.
-- Anything else already under `[Unreleased]` — update that entry to the new net state
-  rather than appending a second one describing the delta from the first.
+- If this branch renames an unreleased item, update the original source entry to its
+  final name; do not append a removal plus an addition.
+- If it removes an unreleased addition, remove that source entry; no entry remains.
+- If it changes something already documented, update the source to the net result,
+  avoiding duplicates and retaining unrelated changes and PR links.
+- On a release branch, fragments may already be consumed. Reconcile the target
+  `.changes/<project>/v<version>.md`, not a missing fragment or generated changelog.
 
 The reference point is the last release **on the branch you target**: a fix branched from
 a `maint/` branch describes its change relative to that branch's most recent release,
 which may be older than the most recent release on `main`.
 
-### 6. Write to the CHANGELOG files
-- For each `## <crate>` zc reports, insert the curated entries into that crate's
-  `CHANGELOG.md` `[Unreleased]` section, merging under the right subsections. Do not
-  clobber existing entries, and skip anything already documented.
-- A repo with both a library-crate changelog and an operator-facing binary changelog
-  (Zebra: `<crate>/CHANGELOG.md` vs the root `CHANGELOG.md`) routes by audience, and the
-  dependency rule above applies only to the **crate** changelogs. Their readers are
-  downstream Rust code, for whom a semver-incompatible bump is a break they must match
-  in lockstep. Node operators do not consume Rust APIs, so
-  [Zebra's guidelines][zebra-changelog] exclude dependency-only bumps from the root
-  changelog unless they carry an operator-relevant security fix.
-  Add a plain-language line to the root changelog for user-facing features only; skip
-  experimental or feature-gated work.
-- **Leave the edits unstaged** so they show up in `git diff` for review.
-- Show a `git diff --stat` of the touched files and audit: no bare-identifier bullet
-  has a trailing period, prose bullets do, every line is 100 chars or fewer.
-- The entry belongs in the **same commit as the change it describes**, never a trailing
-  "update changelogs" commit: a public API change is not complete until its
-  documentation exists, and keeping the two together means the entry travels with the
-  commit when it is cherry-picked or forward-merged. Once the diff has been reviewed,
-  fold each entry into its commit with [`git revise`](https://github.com/mystor/git-revise).
-- A released `## [x.y.z] - DATE` section is the historical record of what that release
-  shipped. Correct a bullet there when it was wrong as written — an inaccurate record is
-  worse than an edited one — but never record anything that happened afterwards, such as
-  a later re-export or a clarification prompted by a subsequent change. That belongs
-  under `[Unreleased]`, where the users who need it will look.
-- The `## [Unreleased]` heading is permanent. Keep it even when the section is empty.
+### 6. Write through the selected source
+**Zebra / Changie (ordinary PRs):**
+- Use `changie new -j PROJECT -k KIND -b BODY`, one distinct change per fragment per
+  project. Repeating `-j` creates one fragment for each project when wording and kind
+  truly match. The breaking-addition exception requires separate `breaking` and `Added`
+  fragments for each affected library.
+- Body is the curated entry **without a leading Markdown `- ` or section heading**;
+  Changie adds those. Include the real `([#N](PR_URL))` when available; never invent a
+  link. Keep a single change together, including any necessary migration instructions.
+- Shell-quote bodies safely: single quotes preserve backticks literally; do not put
+  unescaped backticks inside double quotes, where the shell executes them. For bodies
+  containing apostrophes or multiline text, prefer the interactive `changie new`
+  prompts or an argument vector rather than composing unsafe shell strings.
+- Prefer the CLI for creation. When reconciling an existing YAML fragment, preserve
+  its parsed structure; inspect configuration and CLI-produced values rather than
+  guessing how a kind is serialized.
+- Leave `.changes/unreleased/` fragments unstaged for review. Ordinary PRs do **not**
+  run `changie batch` or regenerate release changelogs.
+
+**Direct Markdown repositories:**
+- Merge curated entries into each matching `CHANGELOG.md` `[Unreleased]` section;
+  keep existing unrelated entries and the heading even when empty. Route by audience
+  in repos with separate operator and library changelogs.
+- Leave edits unstaged. Follow [REFERENCE.md](REFERENCE.md) and local formatting rules.
+
+In either workflow, review only the intended source diff. Keep source entries with
+the change they describe so they travel through cherry-picks; do not commit or rewrite
+history without authorization. For historical corrections, change only what that
+release actually shipped: in Zebra edit its versioned `.changes/<project>/v<version>.md`
+and run `changie merge`, never edit generated output. In direct Markdown repos edit the
+released section itself. Later behavior belongs in new unreleased source entries.
 
 ## Release changelogs (the release-plz PR)
 
-A release differs from a normal PR in two ways that break the default workflow, and both
-cause per-crate `` `x` dependency bumped to `y`. `` entries to be silently omitted:
-
-1. **The version bumps live in the release PR branch, not `main`.** release-plz writes the
-   per-crate `Cargo.toml`/`Cargo.lock` bumps into its `release-plz-*` branch. A default
-   `zc --changelog` diffs against `main`, sees **no** dependency-version changes, and so drops
-   every dependency-bump entry — leaving dependency-propagation crates undocumented.
-2. **The baseline is the previous release, not the branch point.** Diff from the last published
-   release, not `merge-base(main, HEAD)`.
-
-So for a release, run zc against the **release PR branch**, based on the previous release:
+Compare from the **previous published release of each project** to the **exact final
+release-PR head**, including its final `Cargo.toml`/`Cargo.lock` version changes:
 
 ```
-zc --changelog <previous-release-ref> <release-plz-branch-HEAD>
+zc --changelog <previous-release-ref> <final-release-pr-head>
 ```
 
-- Run it **after** any manual version overrides land on the branch. If you correct release-plz's
-  computed versions, zc must see the final numbers or it documents the wrong bumps.
-- zc's per-crate `### Changed` dependency-bump list is the **source of truth** — include all of
-  it. A run against `main` cannot produce it.
-- Write the entries into the **release PR branch's** `CHANGELOG.md` files (they merge to `main`
-  with the release). Do **not** open a separate `main` PR for them: a new `main` push makes
-  release-plz regenerate the release PR and discard any manual version overrides on it.
-- Skip dev-dependency-only bumps (stripped from published crates, so not consumer-visible), and
-  skip the dep list for a binary crate like `zebrad` (its changelog is operator-facing prose).
+If projects have different previous releases, run the appropriate comparisons and use
+each project's results. A default branch-point diff misses unreleased changes; a run
+against `main` misses release-PR dependency bumps. Repeat after the release owner changes
+the version plan. This skill audits entries; it does not independently choose versions.
+
+**Zebra:**
+- The workflow pins Changie v1.25.2. release-plz chooses versions with
+  `changelog_update = false` and `semver_check = false`; the batching script uses exact
+  `v<version>` values from the release manifest, then runs `changie merge`.
+  Never use `changie batch auto` to replace release-plz's version plan.
+- `.github/scripts/batch-release-changelogs.sh` restores `.changes` from
+  `base_revision` before batching. **Do not blindly rerun it over manual source
+  curation:** it overwrites branch-local edits. After batching, curate
+  `.changes/<project>/v<version>.md` on the release PR and run `changie merge`.
+- The script adds a generic dependency entry only when a released project has **no**
+  fragments. Existing fragments therefore do not prove dependency coverage. Audit
+  zc's complete per-crate dependency list against the version file, replacing generic
+  fallback wording where appropriate and adding missing entries without duplicates.
+- Do not put consumed release entries back into `.changes/unreleased/` or patch the
+  generated `CHANGELOG.md` files. Land missing source fragments on `main` before the
+  final refresh when practical. After batching, keep version-file corrections on the
+  release branch; preserve and reapply them if a later refresh regenerates the PR.
+
+**Direct Markdown repositories:** curate the release PR's actual release sections in
+their `CHANGELOG.md` files, following their release process.
+
+For both workflows, skip dev-dependency-only entries and library dependency lists in
+operator-facing `zebrad` entries. Review semantic changes and bug fixes from PRs too;
+zc does not discover every consumer-visible change.
 
 ## `--check` mode: verify, do not write
 
-A mode of **this skill**, not a flag on the `zc` binary: invoke it as `/zc --check`
-(optionally with a PR or branch arg). Passing `--check` to `zc` itself exits 64,
-unknown option. The skill runs the ordinary diff (steps 1 and 2), then compares —
-**reporting discrepancies and writing nothing**: the fast pre-PR gate for the
-"looks public but isn't" error a human cannot eyeball.
+A mode of **this skill**, not a flag on the `zc` binary: invoke `/zc --check`
+(optionally with a PR or branch). Run ordinary zc analysis with the resolved range;
+`--json` can provide structured API/dependency evidence. Do not pass `--check` to zc.
+Do not create/edit fragments, batch, merge, change changelogs, stage, commit, or post
+PR comments in this mode.
 
-1. From zc's output, collect the public-API items: the backtick'd identifiers
-   under each crate's `### Added` / `### Removed`, plus the old and new of
-   `### Changed`.
-2. Collect only the entries **this branch adds**, not the whole `[Unreleased]`
-   section (which also holds other PRs' entries that zc, diffing only this branch,
-   will not report). Take the added (`+`) bullets from `git diff <branch-point>..HEAD
-   -- '**/CHANGELOG.md' 'CHANGELOG.md'`, where branch-point is `git merge-base main
-   HEAD` (the same baseline zc used), keeping only the bare backtick'd identifier
-   bullets. Ignore prose and behavioral bullets, which zc cannot see.
-3. Report two lists and edit nothing:
-   - **Listed but not public**: branch-added identifier bullets zc does not
-     report. Usually a non-public path (for example behind a `pub(crate)` module), or
-     a line that belongs in prose rather than the identifier list.
-   - **Public but undocumented**: items zc reports that the branch did not add.
+1. Record the exact baseline/head used for analysis. Use the same range for source
+   comparison, with the release-specific per-project baselines above when applicable.
+2. Collect **branch-specific net entries**, not every existing entry:
+   - **Zebra ordinary PR:** inspect added, modified, renamed, and deleted
+     `.changes/unreleased/*.yaml` at both refs. Parse complete YAML documents
+     (including multiline bodies), then compare their decoded project/kind/body.
+     Match project keys through `.changie.yaml` before comparing with zc's crate.
+     Exclude unchanged content even if filenames changed; account for edits and
+     deletions rather than grepping only added YAML lines. A removed or corrected
+     stale entry is not a new undocumented API, and updating an unreleased addition
+     must be judged by the net state from step 5, not an intermediate rename.
+   - **Zebra release PR:** inspect the planned projects' target
+     `.changes/<project>/v<version>.md` source entries, plus relevant fragments not
+     yet batched. Treat consumed fragments as moved into version files, not deleted
+     documentation or duplicate entries. Exclude unrelated historical versions and
+     unchanged fragments outside this release. Never use generated changelogs as
+     check input or run batching to make the comparison.
+   - **Direct Markdown:** compare the corresponding `[Unreleased]` or release-section
+     source entries at both refs, accounting for edits/deletions as well as additions.
+     Do not compare the whole unchanged section against a branch-only API diff.
+3. Compare API identifiers and dependency evidence with the curated net entries.
+   Recognize identifiers in curated migration prose and grouped entries; do not treat
+   every backticked argument/type as a separately claimed public API. Treat Zebra's
+   required `breaking`/`Added` pair as intentional coverage, not a duplicate.
+4. Report **Listed but not public** and **Public but undocumented**, with source paths
+   and project keys, plus missing dependency coverage or wrong project/kind placement.
+   Reconcile unreleased additions/renames/removals before classifying discrepancies.
+   Flag prose/behavioral claims needing manual review rather than pretending zc can
+   verify them. An analysis error is an incomplete check, never a pass.
 
-   Both lists empty means the changelog's API entries match the public surface.
-
-   Both lists cover only the API surface. Two requirements have no zc signal, so check
-   them by hand against the PR: a bug fix or a semantics change with an untouched
-   signature needs an entry too, and a commit that changes the public API must carry its
-   entry in that same commit.
+Empty discrepancy lists establish only the checked API/dependency coverage. Inspect the
+PR separately for bug fixes and semantic changes with unchanged signatures, operator
+impact, PR links, and source entries accompanying the changes they describe.
 
 ## Notes
-- Library-crate changelogs are terse and code-pathed; the workspace `CHANGELOG.md`
-  uses plain, user-facing descriptions.
-- zc's baseline is the branch point by default, so a stale local `main` or a
-  branch that is behind upstream will not pollute the diff.
+- Library entries are terse and code-pathed; operator entries use plain, user-facing
+  descriptions. Both are source entries, even when the final destination is a changelog.
+- zc's clean-tree default uses a branch point, so later parent-branch commits do not
+  pollute an ordinary PR diff. Always override that default for release comparisons.
