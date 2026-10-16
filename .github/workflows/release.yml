@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version tag (vMAJOR.MINOR.PATCH)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+
+jobs:
+  release:
+    name: Tag and publish release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Create the release tag and the GitHub Release.
+    steps:
+      - name: Validate the version input and branch
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! printf '%s' "${VERSION}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version must match vMAJOR.MINOR.PATCH, got: ${VERSION}"
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error::releases are cut from main, not ${GITHUB_REF}"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check that the release commit names this version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          crate_version="$(cargo metadata --no-deps --locked --format-version 1 | jq -r '.packages[] | select(.name == "zc") | .version')"
+          if [[ "v${crate_version}" != "${VERSION}" ]]; then
+            echo "::error::Cargo.toml has version ${crate_version}; land the version bump for ${VERSION} first"
+            exit 1
+          fi
+          for pin in "ZcashFoundation/zc@${VERSION}" "--tag ${VERSION}"; do
+            if ! grep -qF -- "${pin}" README.md; then
+              echo "::error::README.md does not mention '${pin}'; land the version bump for ${VERSION} first"
+              exit 1
+            fi
+          done
+
+      - name: Create the annotated tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "::error::tag ${VERSION} already exists"
+            exit 1
+          fi
+          tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags" \
+            --field tag="${VERSION}" \
+            --field message="zc ${VERSION}" \
+            --field object="${GITHUB_SHA}" \
+            --field type=commit \
+            --jq .sha)"
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+            --field ref="refs/tags/${VERSION}" \
+            --field sha="${tag_sha}" >/dev/null
+          gh release create "${VERSION}" \
+            --verify-tag \
+            --title "${VERSION}" \
+            --generate-notes
