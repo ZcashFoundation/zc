@@ -1,0 +1,21 @@
+# `cargo deny check` runs in CI. Consumers build zc from the committed
+# Cargo.lock (`cargo install --locked`, and the action), so every locked crate
+# ships to them.
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities and unsound crates always fail; yanked crates fail too.
+yanked = "deny"
+
+[licenses]
+allow = ["Apache-2.0", "MIT", "Unicode-3.0", "Unlicense"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
