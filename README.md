@@ -50,7 +50,7 @@ steps:
       ref: ${{ github.event.pull_request.head.sha }}
       fetch-depth: 0
       persist-credentials: false
-  - uses: ZcashFoundation/zc@v0.6.0
+  - uses: ZcashFoundation/zc@v0.7.0
     id: api
     with:
       baseline: origin/${{ github.base_ref }}
@@ -64,7 +64,7 @@ The action installs the `cargo-public-api` and Rust nightly versions tested with
 `features` chooses which Cargo features each crate is analysed with: `all` (the default), `default`, or `exclude:<feature>[,<feature>...]`. Use `exclude:` when some features only exist for tests or fuzzing and should not count as public API:
 
 ```yaml
-  - uses: ZcashFoundation/zc@v0.6.0
+  - uses: ZcashFoundation/zc@v0.7.0
     with:
       baseline: origin/${{ github.base_ref }}
       fail-on: api-breaking
@@ -103,7 +103,7 @@ rustup toolchain install nightly-2026-10-15 --profile minimal
 Then install `zc` itself, a single Rust binary:
 
 ```sh
-cargo install --git https://github.com/ZcashFoundation/zc --tag v0.6.0 --locked
+cargo install --git https://github.com/ZcashFoundation/zc --tag v0.7.0 --locked
 ```
 
 …or from a checkout:
