@@ -77,13 +77,14 @@ pub fn rustdoc_json(
         return Ok(cache_path);
     }
 
+    let feature_args = ctx.features.cargo_args(crate_name, worktree, ref_sha)?;
     let mut command = Command::new("cargo");
     command
         .arg(format!("+{}", ctx.toolchain))
         .args(["rustdoc", "-q", "--manifest-path"])
         .arg(worktree.join("Cargo.toml"))
         .args(["-p", crate_name, "--lib"])
-        .args(&ctx.feature_args)
+        .args(&feature_args)
         .args(["--", "-Z", "unstable-options", "--output-format", "json"])
         .env("CARGO_TARGET_DIR", target);
 
@@ -186,7 +187,6 @@ pub fn analyze(ctx: &Ctx, crates: &[String], tables: &PubdepTables) -> Vec<Crate
         let mut command = Command::new("cargo");
         command
             .arg("public-api")
-            .args(&ctx.feature_args)
             .args(["-p", crate_name, "-ss", "diff"])
             .arg(&base_json)
             .arg(&head_json)
@@ -285,22 +285,26 @@ fn error_tail(stderr: &str) -> String {
 }
 
 fn error_command(ctx: &Ctx, crate_name: &str, stage: ErrorStage) -> String {
-    let features = ctx.feature_args.join(" ");
-    if stage != ErrorStage::Diff {
-        return format!("cargo public-api {features} -p {crate_name} -ss");
+    let command_at = |worktree: &Path, ref_sha: &str| {
+        let mut parts = vec!["cargo public-api".to_owned()];
+        parts.extend(
+            ctx.features
+                .cargo_args(crate_name, worktree, ref_sha)
+                .unwrap_or_default(),
+        );
+        parts.push(format!("-p {crate_name} -ss"));
+        parts.join(" ")
+    };
+    let baseline = command_at(&ctx.baseline_worktree, &ctx.refs.baseline_sha);
+    let head = command_at(&ctx.head_worktree, &ctx.refs.head_sha);
+    match stage {
+        ErrorStage::BaselineBuild => baseline,
+        ErrorStage::HeadBuild => head,
+        ErrorStage::Diff => format!(
+            "run at {} ({}): {baseline}; run at {} ({}): {head}",
+            ctx.refs.baseline_label, ctx.refs.baseline_sha, ctx.refs.head_label, ctx.refs.head_sha,
+        ),
     }
-
-    format!(
-        "run at {} ({}): cargo public-api {} -p {} -ss; run at {} ({}): cargo public-api {} -p {} -ss",
-        ctx.refs.baseline_label,
-        ctx.refs.baseline_sha,
-        features,
-        crate_name,
-        ctx.refs.head_label,
-        ctx.refs.head_sha,
-        features,
-        crate_name
-    )
 }
 
 /// Returns the first matching remediation hint for cargo-public-api stderr.
@@ -326,7 +330,7 @@ pub fn hint(stderr: &str) -> String {
     {
         "cargo-public-api can only analyze library targets. Exclude this crate or add a library target."
     } else if text.contains("could not compile") {
-        "The crate did not compile under the selected feature set. Fix the build or choose a supported feature policy."
+        "The crate did not compile under the selected feature set. Fix the build, or choose a feature policy it builds under with --features."
     } else {
         "Run the command shown above and fix the failing crate build before trusting the API diff."
     }

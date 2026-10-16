@@ -28,8 +28,8 @@ pub fn dump(ctx: &Ctx, ref_sha: &str, crates: &[String]) -> HashMap<String, Trai
     let mut maps = HashMap::new();
     for (index, crate_name) in crates.iter().enumerate() {
         let cache_name = format!(
-            "{}.{}.{}.traitmap.tsv",
-            sha, ctx.cache.script_hash, crate_name
+            "{}.{}.{}.{}.traitmap.tsv",
+            sha, ctx.cache.script_hash, ctx.cache.api_fp, crate_name
         );
         let cache_path = ctx.cache.path(&cache_name);
         if let Ok(cached) = fs::read_to_string(&cache_path) {

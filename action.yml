@@ -37,6 +37,12 @@ inputs:
     description: Findings that fail the step (breaking, api-breaking, error, or none)
     required: false
     default: breaking
+  features:
+    description: >-
+      Cargo features each crate is analysed with: all, default, or exclude:<feature>[,<feature>...]
+      for every declared feature except the listed ones
+    required: false
+    default: all
 
 outputs:
   verdict:
@@ -81,6 +87,7 @@ runs:
         INPUT_WITH_VALUES: ${{ inputs.with-values }}
         INPUT_WITH_CHANGELOG: ${{ inputs.with-changelog }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_FEATURES: ${{ inputs.features }}
         RUSTUP_TOOLCHAIN: nightly-2026-10-15
         ZC_TOOLCHAIN: nightly-2026-10-15
       run: |
@@ -110,6 +117,14 @@ runs:
           breaking | api-breaking | error | none) arguments+=(--fail-on "$INPUT_FAIL_ON") ;;
           *)
             echo "::error title=Invalid fail-on input::Expected breaking, api-breaking, error, or none."
+            exit 64
+            ;;
+        esac
+
+        case "$INPUT_FEATURES" in
+          all | default | exclude:?*) arguments+=(--features "$INPUT_FEATURES") ;;
+          *)
+            echo "::error title=Invalid features input::Expected all, default, or exclude:<feature>[,<feature>...]."
             exit 64
             ;;
         esac

@@ -16,8 +16,9 @@ a single command tells you whether a branch breaks your published surface.
 2. **Transitive `Cargo.lock` diff** (`--with-lock`) — transitive version changes,
    each annotated with the direct deps that pull it in.
 3. **Per-crate public-API diff** (`cargo public-api`) — removed / changed / added
-   items per workspace crate. Built with `--all-features` so feature-gated public
-   items are never silently missed. If a crate cannot be analyzed, zc reports
+   items per workspace crate. Built with `--all-features` by default, so
+   feature-gated public items are never silently missed; `--features` narrows
+   that when a workspace has test-only or fuzz-only features. If a crate cannot be analyzed, zc reports
    the failing stage, stderr tail, command, and hint instead of returning an empty
    crate result.
 4. **Const/static value & doc-comment diff** (`--with-values`) — catches changes
@@ -60,6 +61,18 @@ The action installs the `cargo-public-api` and Rust nightly versions tested with
 
 `fail-on` chooses which findings fail the step: `breaking` (the default), `api-breaking` to let dependency, value, and doc changes pass, `error` for analysis failures only, or `none`. Findings are reported the same way in every mode.
 
+`features` chooses which Cargo features each crate is analysed with: `all` (the default), `default`, or `exclude:<feature>[,<feature>...]`. Use `exclude:` when some features only exist for tests or fuzzing and should not count as public API:
+
+```yaml
+  - uses: ZcashFoundation/zc@v0.6.0
+    with:
+      baseline: origin/${{ github.base_ref }}
+      fail-on: api-breaking
+      features: exclude:proptest-impl,fuzzing
+```
+
+`exclude:` enables every other feature each crate declares at each ref, and also leaves out any feature of that crate that turns on a listed one. A crate that does not declare a listed name ignores it, and zc warns when no workspace crate declares it, which usually means a typo.
+
 The step sets three outputs: `verdict` (`ok`, `breaking`, or `error`), `report`, the path of the JSON report, and `changelog`, the path of the Keep a Changelog draft. A later step can read `${{ steps.api.outputs.verdict }}` or parse the full document. Neither path output ever names a file that does not exist: `report` is empty when the run failed before writing one, and `changelog` is empty unless `with-changelog` is enabled and the analysis produced a draft. Inside Actions, `zc` also annotates the run and writes a summary of the verdict, totals, and per-crate counts to the job summary.
 
 Pin the action to the full commit SHA of a release tag when the workflow requires an immutable dependency. See [SECURITY.md](SECURITY.md).
@@ -71,9 +84,9 @@ zc stores persistent cache files under `target/zc-cache/`, or under
 resolved dependency summaries, derived value/doc and trait-map indexes, and
 per-ref per-crate rustdoc JSON for public API analysis.
 
-Rustdoc JSON cache entries are keyed by commit SHA, crate name,
-`cargo-public-api` version, nightly `rustc` version, and the feature policy used
-for the run. Working-tree snapshots are not written to the rustdoc JSON cache.
+Rustdoc JSON cache entries, and the value and trait-map indexes built from them,
+are keyed by commit SHA, crate name, `cargo-public-api` version, nightly `rustc`
+version, and the `--features` policy used for the run. Working-tree snapshots are not written to the rustdoc JSON cache.
 zc removes `*.api.json` files older than 14 days at startup. Delete
 `target/zc-cache/` with `rm -rf target/zc-cache` to clear all zc cache
 state for a checkout.
@@ -110,6 +123,7 @@ zc --with-values main    # also flag const/static value + doc changes
 zc --json main           # machine-readable output for CI
 zc --report zc.json main # also write the JSON report to a file
 zc --fail-on none main   # report every finding without failing the run
+zc --features exclude:proptest-impl,fuzzing main # leave test and fuzz features out of the diff
 zc --changelog main      # draft a Keep a Changelog changelog (markdown)
 zc --changelog-file c.md main # also write that draft to a file
 zc --version             # print the installed version
@@ -126,6 +140,7 @@ The report directory must already exist.
 
 Top-level fields:
 
+- `features`: the feature policy the run used, such as `all` or `exclude:fuzzing,proptest-impl`
 - `verdict`: `ok`, `breaking`, or `error`
 - `totals`: API, dependency, value, doc, public-dep, and error counts
 - `deps`, `values`, `docs`: structured diff details
@@ -151,7 +166,7 @@ A crate error has this shape:
     "ref_sha": "abc123...",
     "command": "cargo public-api --all-features -p zebra-state -ss",
     "stderr": "... tail of the underlying tool stderr ...",
-    "hint": "The crate did not compile under the selected feature set. Fix the build or choose a supported feature policy."
+    "hint": "The crate did not compile under the selected feature set. Fix the build, or choose a feature policy it builds under with --features."
   }
 }
 ```
@@ -162,10 +177,10 @@ command to run in a checkout of `ref_sha`; diff errors show the rustdoc JSON
 diff form.
 
 JSON consumers should treat `verdict: error` as an inconclusive analysis. zc
-keeps the `--all-features` policy for the public API diff and does not fall back
-to default features automatically, because doing so can hide feature-gated public
-API. Crates whose all-features surface cannot be documented must be fixed,
-excluded outside zc, or handled by a caller with an explicit feature policy.
+never falls back to fewer features on its own, because doing so can hide
+feature-gated public API. A crate whose surface cannot be documented under the
+selected `--features` policy must be fixed, or analysed under a policy it builds
+with.
 
 ### `--changelog`
 

@@ -3,6 +3,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::features::FeaturePolicy;
+
 /// Exit codes, mirroring the documented contract.
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_BREAKING: i32 = 1;
@@ -90,6 +92,8 @@ pub struct Options {
     pub changelog_mode: bool,
     pub group_mode: GroupMode,
     pub fail_on: FailOn,
+    /// Which Cargo features each crate is documented with.
+    pub features: FeaturePolicy,
     /// Path the JSON report is written to, in addition to the selected stdout output.
     pub report_path: Option<PathBuf>,
     /// Path the Keep a Changelog document is written to, in addition to the selected
@@ -434,6 +438,8 @@ impl Verdict {
 #[derive(Clone, Debug)]
 pub struct Report {
     pub refs: Refs,
+    /// The feature policy every crate was documented with.
+    pub features: FeaturePolicy,
     pub deps: DepDiff,
     pub crates: Vec<CrateResult>,
     pub crate_count: usize,
