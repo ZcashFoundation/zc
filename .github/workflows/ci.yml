@@ -65,9 +65,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the declared MSRV toolchain
-        run: rustup toolchain install 1.82 --profile minimal --no-self-update
+        run: rustup toolchain install 1.85 --profile minimal --no-self-update
       - name: check
-        run: cargo +1.82 check --locked --all-features --all-targets
+        run: cargo +1.85 check --locked --all-features --all-targets
 
   test:
     name: integration tests
