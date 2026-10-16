@@ -11,6 +11,7 @@ struct JsonReport<'a> {
     baseline_sha: &'a str,
     head: &'a str,
     head_sha: &'a str,
+    features: String,
     verdict: &'static str,
     totals: Totals,
     deps: Deps<'a>,
@@ -219,6 +220,7 @@ pub fn emit(report: &Report) -> String {
         baseline_sha: &report.refs.baseline_short,
         head: &report.refs.head_label,
         head_sha: &report.refs.head_short,
+        features: report.features.to_string(),
         verdict: report.verdict().as_str(),
         totals: Totals {
             removed: report.removed_total,

@@ -1158,6 +1158,88 @@ case "$out" in
 esac
 rm -rf "$repo"
 
+# 17) --features chooses which Cargo features each crate is analysed with. One repo runs
+#     every policy in turn, so a cached result from one policy must not leak into another.
+repo=$(new_repo 'pub fn stable() {}')
+cat >>"$repo/Cargo.toml" <<'EOF'
+
+[features]
+fuzzing = []
+extra = []
+tools = ["fuzzing"]
+EOF
+features_lib=$'pub fn stable() {}\n#[cfg(feature = "fuzzing")]\npub fn fuzz_only() {}\n#[cfg(feature = "extra")]\npub fn extra_only() {}'
+base=$(commit_lib "$repo" "$features_lib" 'feature-gated items')
+fuzz_head=$(commit_lib "$repo" $'pub fn stable() {}\n#[cfg(feature = "extra")]\npub fn extra_only() {}' 'drop the fuzz-only item')
+out=$(cd "$repo" && "$ZC" "$base" "$fuzz_head" 2>&1)
+rc=$?
+assert_eq "$rc" 1 "--features all (default): a fuzz-only removal is breaking"
+assert_contains "$out" "fuzz_only" "--features all (default): names the fuzz-only item"
+case "$out" in
+*"Features:"*) bad "--features all (default): the header does not mention features" ;;
+*) ok "--features all (default): the header does not mention features" ;;
+esac
+out=$(cd "$repo" && "$ZC" --features exclude:fuzzing "$base" "$fuzz_head" 2>&1)
+rc=$?
+assert_eq "$rc" 0 "--features exclude: an excluded feature's removal passes"
+assert_contains "$out" "Features: exclude:fuzzing" "--features exclude: the header names the policy"
+case "$out" in
+*"warning:"*) bad "--features exclude: a declared name raises no warning" ;;
+*) ok "--features exclude: a declared name raises no warning" ;;
+esac
+out=$(cd "$repo" && "$ZC" --features default "$base" "$fuzz_head" 2>&1)
+rc=$?
+assert_eq "$rc" 0 "--features default: a non-default feature's removal passes"
+extra_head=$(commit_lib "$repo" $'pub fn stable() {}\n#[cfg(feature = "fuzzing")]\npub fn fuzz_only() {}' 'drop the extra item')
+out=$(cd "$repo" && "$ZC" --features exclude:fuzzing "$base" "$extra_head" 2>&1)
+rc=$?
+assert_eq "$rc" 1 "--features exclude: features that are not excluded stay analysed"
+assert_contains "$out" "extra_only" "--features exclude: names the removed item of a kept feature"
+json=$(cd "$repo" && "$ZC" --json --features exclude:fuzzing "$base" "$fuzz_head" 2>/dev/null)
+assert_eq "$(printf '%s' "$json" | jq -r '.features')" "exclude:fuzzing" "--features exclude: the JSON report records the policy"
+assert_eq "$(printf '%s' "$json" | jq -r '.verdict')" "ok" "--features exclude: the JSON verdict matches"
+json=$(cd "$repo" && "$ZC" --json "$base" "$fuzz_head" 2>/dev/null)
+assert_eq "$(printf '%s' "$json" | jq -r '.features')" "all" "--features all: the JSON report records the default policy"
+out=$(cd "$repo" && "$ZC" --features exclude:fuzing "$base" "$fuzz_head" 2>&1)
+rc=$?
+assert_eq "$rc" 1 "--features exclude: a misspelled name still analyses the feature"
+assert_contains "$out" "no workspace crate declares it" "--features exclude: a misspelled name warns"
+git -C "$repo" checkout -q "$base"
+cat >"$repo/Cargo.toml" <<'EOF'
+[package]
+name = "zc_fixture"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+fuzzing = []
+extra = []
+tools = ["fuzzing"]
+added = []
+EOF
+added_head=$(commit_lib "$repo" "$features_lib"$'\n#[cfg(feature = "added")]\npub fn added_only() {}' 'add a feature at head')
+out=$(cd "$repo" && "$ZC" --features exclude:fuzzing "$base" "$added_head" 2>&1)
+rc=$?
+assert_eq "$rc" 0 "--features exclude: a feature only the head declares builds at both refs"
+assert_contains "$out" "added_only" "--features exclude: the head-only feature's item is analysed"
+summary_file=$(mktemp)
+(cd "$repo" && GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$summary_file" "$ZC" --features exclude:fuzzing "$base" "$fuzz_head" >/dev/null 2>&1)
+assert_contains "$(cat "$summary_file")" 'Features: `exclude:fuzzing`' "--features exclude: the step summary names the policy"
+rm -f "$summary_file"
+rm -rf "$repo"
+
+# 17b) An unknown or missing --features value is a usage error.
+out=$("$ZC" --features nope main 2>&1)
+rc=$?
+assert_eq "$rc" 64 "--features: an unknown policy exits 64"
+assert_contains "$out" "expected all, default, or exclude:" "--features: names the accepted policies"
+out=$("$ZC" --features exclude: main 2>&1)
+rc=$?
+assert_eq "$rc" 64 "--features: an empty exclude list exits 64"
+out=$("$ZC" --features 2>&1)
+rc=$?
+assert_eq "$rc" 64 "--features: a missing value exits 64"
+
 echo ""
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]

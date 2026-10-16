@@ -29,6 +29,7 @@ fn report() -> Report {
         error_crate_count: 0,
         pubdep_break_total: 0,
         pubdep_review_total: 0,
+        features: crate::features::FeaturePolicy::All,
     }
 }
 

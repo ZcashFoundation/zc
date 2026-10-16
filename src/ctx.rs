@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::cache::{Cache, RunTmp};
+use crate::features::CrateFeatures;
 use crate::model::{Options, Refs};
 use crate::progress::Progress;
 use crate::style::Style;
@@ -15,8 +16,8 @@ pub struct Ctx {
     pub tmp: RunTmp,
     /// Nightly toolchain name used for rustdoc JSON.
     pub toolchain: String,
-    /// Feature policy passed to every cargo-public-api and rustdoc invocation.
-    pub feature_args: Vec<String>,
+    /// Feature arguments for every rustdoc JSON build and cargo-public-api run.
+    pub features: CrateFeatures,
     pub refs: Refs,
     pub progress: Progress,
     /// Detached worktree at the baseline ref.

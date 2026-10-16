@@ -23,7 +23,12 @@ struct Package {
     rust_version: Option<String>,
     #[serde(default)]
     dependencies: Vec<Dependency>,
+    #[serde(default)]
+    features: BTreeMap<String, Vec<String>>,
 }
+
+/// Each workspace crate's `[features]` table, by crate name.
+pub type FeatureTables = BTreeMap<String, BTreeMap<String, Vec<String>>>;
 
 #[derive(Deserialize)]
 struct Dependency {
@@ -100,6 +105,31 @@ pub fn workspace_crate_names(workspace_dir: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+/// Reads every workspace crate's `[features]` table in `workspace_dir`.
+pub fn workspace_feature_tables(workspace_dir: &Path) -> Result<FeatureTables, String> {
+    let output = Command::new("cargo")
+        .arg("metadata")
+        .arg("--manifest-path")
+        .arg(workspace_dir.join("Cargo.toml"))
+        .arg("--no-deps")
+        .arg("--format-version")
+        .arg("1")
+        .output()
+        .map_err(|error| format!("cargo metadata failed to start: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let metadata = serde_json::from_slice::<Metadata>(&output.stdout)
+        .map_err(|error| format!("cargo metadata returned unreadable JSON: {error}"))?;
+    let members: HashSet<_> = metadata.workspace_members.into_iter().collect();
+    Ok(metadata
+        .packages
+        .into_iter()
+        .filter(|package| members.contains(&package.id))
+        .map(|package| (package.name, package.features))
+        .collect())
 }
 
 /// Reads the merged external dependency table at a git ref.

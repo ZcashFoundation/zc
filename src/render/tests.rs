@@ -55,6 +55,7 @@ fn json_shape_and_field_order_match_the_documented_schema() {
         error_crate_count: 0,
         pubdep_break_total: 0,
         pubdep_review_total: 0,
+        features: crate::features::FeaturePolicy::All,
     };
     assert_eq!(
         json::emit(&report),
@@ -63,6 +64,7 @@ fn json_shape_and_field_order_match_the_documented_schema() {
   "baseline_sha": "1111111",
   "head": "working tree",
   "head_sha": "2222222",
+  "features": "all",
   "verdict": "ok",
   "totals": {
     "removed": 0,

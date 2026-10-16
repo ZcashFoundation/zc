@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::ctx::Ctx;
+use crate::features::FeaturePolicy;
 use crate::group;
 use crate::model::{
     Bump, CrateResult, CrateStatus, DepDiff, GroupMode, GroupRecord, LockDiff, Report, Section,
@@ -26,6 +27,14 @@ pub fn header(ctx: &Ctx) {
         ctx.refs.head_short,
         ctx.style.reset
     );
+    if *ctx.features.policy() != FeaturePolicy::All {
+        println!(
+            "{}Features: {}{}",
+            ctx.style.dim,
+            ctx.features.policy(),
+            ctx.style.reset
+        );
+    }
     println!();
 }
 

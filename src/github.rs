@@ -7,6 +7,7 @@ use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::io::Write as _;
 
+use crate::features::FeaturePolicy;
 use crate::model::{CrateStatus, FailOn, Report, Verdict};
 
 /// True inside a GitHub Actions job.
@@ -75,6 +76,9 @@ pub fn step_summary(report: &Report) -> String {
         report.refs.head_label,
         report.refs.head_short
     );
+    if report.features != FeaturePolicy::All {
+        let _ = writeln!(out, "Features: `{}`\n", report.features);
+    }
 
     out.push_str("| Total | Count |\n| --- | ---: |\n");
     for (label, count) in [

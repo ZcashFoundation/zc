@@ -87,12 +87,18 @@ pub fn compute(ctx: &Ctx, tables: &PubdepTables, crate_name: &str) -> Vec<Pubdep
         return Vec::new();
     }
 
+    let Ok(feature_args) =
+        ctx.features
+            .cargo_args(crate_name, &ctx.head_worktree, &ctx.refs.head_sha)
+    else {
+        return Vec::new();
+    };
     let mut command = Command::new("cargo");
     command
         .env("CARGO_TARGET_DIR", &ctx.head_target)
         .arg(format!("+{}", ctx.toolchain))
         .arg("public-api")
-        .args(&ctx.feature_args)
+        .args(&feature_args)
         .arg("--manifest-path")
         .arg(ctx.head_worktree.join("Cargo.toml"))
         .arg("-p")

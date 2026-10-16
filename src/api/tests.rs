@@ -74,8 +74,8 @@ fn selects_hints_case_insensitively_in_spec_order() {
         "library target."
     );
     const COMPILE: &str = concat!(
-        "The crate did not compile under the selected feature set. Fix the build or choose a ",
-        "supported feature policy."
+        "The crate did not compile under the selected feature set. Fix the build, or choose a ",
+        "feature policy it builds under with --features."
     );
     const FALLBACK: &str = concat!(
         "Run the command shown above and fix the failing crate build before trusting the API ",

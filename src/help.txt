@@ -95,6 +95,7 @@ OPTIONS
                        baseline_sha: "<short sha>",
                        head:         "<ref as given, or 'working tree'>",
                        head_sha:     "<short sha>",
+                       features:     "all" | "default" | "exclude:<a>,<b>",
                        verdict:      "ok" | "breaking" | "error",
                        totals: {
                          removed, changed, added,  # API items
@@ -123,8 +124,8 @@ OPTIONS
                        ]
                      }
                    Error `stage` is baseline_build, head_build, or diff.
-                   zc keeps --all-features and does not automatically fall
-                   back to default features because that can hide public API.
+                   zc never falls back to fewer features on its own, because
+                   that can hide public API; choose a policy with --features.
   --report <path>  Also write the --json document to <path>, keeping the
                    selected output on stdout. The directory must already exist,
                    and <path> is cleared when the run starts.
@@ -142,6 +143,22 @@ OPTIONS
                      none          nothing.
                    The verdict and the report are identical in every mode;
                    only the exit status changes.
+  --features <policy>
+                   Which Cargo features each crate is analysed with
+                   (default: all):
+                     all       every feature, so no feature-gated public item
+                               is missed.
+                     default   each crate's default features.
+                     exclude:<feature>[,<feature>...]
+                               every feature a crate declares except the
+                               listed ones, and except any feature of that
+                               crate that enables a listed one. A crate that
+                               does not declare a listed name ignores it, so
+                               one list serves the whole workspace. Use it to
+                               leave test-only or fuzz-only surfaces out of the
+                               diff, for example exclude:proptest-impl,fuzzing.
+                   Features are read from each ref, so a feature added or
+                   removed between the refs is handled at each side.
 
 EXAMPLES
   zc                     # if dirty: HEAD -> working tree
@@ -156,6 +173,8 @@ EXAMPLES
   zc --report r.json     # also write the JSON report to a file
   zc --changelog-file c.md # also write the changelog draft to a file
   zc --fail-on none      # report everything, never fail the run
+  zc --features exclude:proptest-impl,fuzzing main
+                         # leave test-only and fuzz-only API out of the diff
 
 OUTPUT
   Sections are printed in order:
@@ -189,9 +208,9 @@ ENVIRONMENT
   CARGO_TARGET_DIR   Used as the root for zc's cache. When unset,
                      `target/zc-cache/` is used. Dependency and derived
                      TSV caches are keyed on the resolved ref SHA plus a hash
-                     of the zc binary. Rustdoc JSON is keyed on ref SHA, crate,
-                     cargo-public-api version, nightly rustc version, and
-                     feature policy.
+                     of the zc binary. Rustdoc JSON, and the value and trait-map
+                     indexes built from it, are also keyed on cargo-public-api
+                     version, nightly rustc version, and feature policy.
   ZC_TOOLCHAIN     Nightly toolchain name used to build rustdoc JSON.
                      Defaults to the first installed `nightly*` toolchain.
   NO_COLOR           When set to any non-empty value, disables ANSI

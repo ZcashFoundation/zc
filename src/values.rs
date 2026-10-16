@@ -92,7 +92,10 @@ fn dump_index(
     crate_count: usize,
     target: &std::path::Path,
 ) -> Vec<IndexRow> {
-    let cache_name = format!("{}.{}.values.tsv", ref_sha, ctx.cache.script_hash);
+    let cache_name = format!(
+        "{}.{}.{}.values.tsv",
+        ref_sha, ctx.cache.script_hash, ctx.cache.api_fp
+    );
     if let Some(cached) = ctx.cache.read_if_present(&cache_name) {
         return parse_tsv(&cached);
     }

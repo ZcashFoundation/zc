@@ -12,6 +12,7 @@ mod changelog;
 mod changelog_out;
 mod ctx;
 mod deps;
+mod features;
 mod git;
 mod github;
 mod group;
@@ -32,6 +33,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use ctx::Ctx;
+use features::{CrateFeatures, FeaturePolicy};
 use model::{FailOn, GroupMode, Options, Refs, Report, EXIT_ANALYSIS, EXIT_OK, EXIT_USAGE};
 use progress::Progress;
 use style::Style;
@@ -63,6 +65,7 @@ fn parse_args(argv: Vec<String>, style: &Style) -> Result<Args, (String, i32)> {
         changelog_mode: false,
         group_mode: GroupMode::Mod,
         fail_on: FailOn::Breaking,
+        features: FeaturePolicy::All,
         report_path: None,
         changelog_path: None,
     };
@@ -93,6 +96,22 @@ fn parse_args(argv: Vec<String>, style: &Style) -> Result<Args, (String, i32)> {
                     ));
                 };
                 opts.fail_on = fail_on;
+            }
+            "--features" => {
+                let Some(value) = it.next() else {
+                    return Err((missing_value(style, "--features"), EXIT_USAGE));
+                };
+                let Some(features) = FeaturePolicy::parse(&value) else {
+                    return Err((
+                        format!(
+                            "{}error:{} invalid --features value '{value}', expected all, \
+                             default, or exclude:<feature>[,<feature>...] (run with --help for usage)",
+                            style.red, style.reset
+                        ),
+                        EXIT_USAGE,
+                    ));
+                };
+                opts.features = features;
             }
             "--report" => {
                 let Some(path) = it.next() else {
@@ -310,16 +329,15 @@ fn run() -> Result<i32, String> {
         }
     };
 
-    // cargo-public-api and the rustdoc JSON builds always run with all features, so
-    // feature-gated public items are never silently missing from the diff, trait map, or
-    // value/doc index. Kept identical across all of them so they stay in sync.
-    let feature_args = vec!["--all-features".to_string()];
+    // Every rustdoc JSON build, and so the diff, trait map, and value/doc index, uses the
+    // same feature policy, so they stay in sync.
+    let features = CrateFeatures::new(opts.features.clone());
 
     let cache = cache::Cache::new(
         VERSION,
         &cargo_public_api_version,
         &rustc_version,
-        &feature_args,
+        &opts.features.fingerprint_args(),
     )
     .map_err(|e| format!("{}error:{} {e}", style.red, style.reset))?;
     let tmp =
@@ -391,7 +409,7 @@ fn run() -> Result<i32, String> {
         cache,
         tmp,
         toolchain,
-        feature_args,
+        features,
         refs,
         progress: Progress::new(),
         baseline_worktree,
@@ -402,6 +420,15 @@ fn run() -> Result<i32, String> {
 
     if !document_mode {
         render::header(&ctx);
+    }
+    for name in ctx
+        .features
+        .undeclared_exclusions(&ctx.head_worktree, &ctx.refs.head_sha)
+    {
+        eprintln!(
+            "{}warning:{} --features excludes '{name}', but no workspace crate declares it",
+            ctx.style.yellow, ctx.style.reset
+        );
     }
 
     // ── workspace dependency diff ─────────────────────────────────────
@@ -487,6 +514,7 @@ fn run() -> Result<i32, String> {
 
     let report = model::Report {
         refs: ctx.refs.clone(),
+        features: ctx.opts.features.clone(),
         deps: dep_diff,
         crates,
         crate_count,
