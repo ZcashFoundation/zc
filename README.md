@@ -84,7 +84,7 @@ First install the prerequisites (see [Requirements](#requirements)):
 
 ```sh
 cargo install cargo-public-api --version 0.52.0 --locked
-rustup toolchain install nightly-2026-07-18 --profile minimal
+rustup toolchain install nightly-2026-10-15 --profile minimal
 ```
 
 Then install `zc` itself, a single Rust binary:
