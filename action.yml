@@ -59,7 +59,7 @@ runs:
     - name: Install the Rust nightly used by zc
       shell: bash
       env:
-        ZC_TOOLCHAIN: nightly-2026-07-18
+        ZC_TOOLCHAIN: nightly-2026-10-15
       run: rustup toolchain install "$ZC_TOOLCHAIN" --profile minimal --no-self-update
 
     - name: Install cargo-public-api
@@ -68,7 +68,7 @@ runs:
         tool: cargo-public-api@0.52.0
         checksum: true
       env:
-        RUSTUP_TOOLCHAIN: nightly-2026-07-18
+        RUSTUP_TOOLCHAIN: nightly-2026-10-15
 
     - name: Check the public API and dependencies
       id: check
@@ -81,8 +81,8 @@ runs:
         INPUT_WITH_VALUES: ${{ inputs.with-values }}
         INPUT_WITH_CHANGELOG: ${{ inputs.with-changelog }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
-        RUSTUP_TOOLCHAIN: nightly-2026-07-18
-        ZC_TOOLCHAIN: nightly-2026-07-18
+        RUSTUP_TOOLCHAIN: nightly-2026-10-15
+        ZC_TOOLCHAIN: nightly-2026-10-15
       run: |
         set -euo pipefail
 
