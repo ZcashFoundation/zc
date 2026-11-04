@@ -264,6 +264,24 @@ pub fn summary(ctx: &Ctx, report: &Report) {
         report.crate_count,
         ctx.style.reset
     );
+    if !report.skipped.is_empty() {
+        println!(
+            "  {}skipped: {}{}",
+            ctx.style.dim,
+            skipped_list(report, |name| name.to_string()),
+            ctx.style.reset
+        );
+    }
+}
+
+/// `name (reason), ...` for the crates left out of the API analysis.
+pub fn skipped_list(report: &Report, name: impl Fn(&str) -> String) -> String {
+    report
+        .skipped
+        .iter()
+        .map(|skipped| format!("{} ({})", name(&skipped.name), skipped.reason.describe()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_items(

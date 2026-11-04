@@ -1240,6 +1240,46 @@ out=$("$ZC" --features 2>&1)
 rc=$?
 assert_eq "$rc" 64 "--features: a missing value exits 64"
 
+# 18) Members with no public API are skipped, not reported as analysis errors:
+#     a binary-only crate (cargo public-api cannot document it) and a
+#     `publish = false` library.
+repo=$(mktemp -d)
+git -C "$repo" init -q
+git -C "$repo" config user.email t@t
+git -C "$repo" config user.name t
+git -C "$repo" config commit.gpgsign false
+printf '/target\n' >"$repo/.gitignore"
+printf '[workspace]\nmembers = ["zc_fixture", "fuzz", "internal"]\nresolver = "2"\n' >"$repo/Cargo.toml"
+mkdir -p "$repo/zc_fixture/src" "$repo/fuzz/src" "$repo/internal/src"
+printf '[package]\nname = "zc_fixture"\nversion = "0.1.0"\nedition = "2021"\n' >"$repo/zc_fixture/Cargo.toml"
+printf 'pub fn foo() {}\n' >"$repo/zc_fixture/src/lib.rs"
+printf '[package]\nname = "fuzz"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n\n[[bin]]\nname = "target"\npath = "src/target.rs"\n' >"$repo/fuzz/Cargo.toml"
+printf 'fn main() {}\n' >"$repo/fuzz/src/target.rs"
+printf '[package]\nname = "internal"\nversion = "0.1.0"\nedition = "2021"\npublish = false\n' >"$repo/internal/Cargo.toml"
+printf 'pub fn helper() {}\n' >"$repo/internal/src/lib.rs"
+(cd "$repo" && cargo generate-lockfile -q) >/dev/null 2>&1
+git -C "$repo" add -A
+git -C "$repo" commit -qm base
+base=$(git -C "$repo" rev-parse HEAD)
+printf 'pub fn foo() {}\npub fn added() {}\n' >"$repo/zc_fixture/src/lib.rs"
+printf 'pub fn renamed() {}\n' >"$repo/internal/src/lib.rs"
+git -C "$repo" add -A
+git -C "$repo" commit -qm head
+head=$(git -C "$repo" rev-parse HEAD)
+out=$(cd "$repo" && "$ZC" "$base" "$head" 2>&1)
+rc=$?
+assert_eq "$rc" 0 "skipped crates: no analysis error"
+assert_contains "$out" "(1/1 crates with changes)" "skipped crates: only the published library is counted"
+assert_contains "$out" "skipped: fuzz (no library target), internal (publish = false)" "skipped crates: the summary names each one and why"
+json=$(cd "$repo" && "$ZC" --json "$base" "$head" 2>/dev/null)
+assert_eq "$(printf '%s' "$json" | jq -c '[.crates[].name]')" '["zc_fixture"]' "skipped crates: --json analyses only the published library"
+assert_eq "$(printf '%s' "$json" | jq -c '.skipped')" '[{"name":"fuzz","reason":"no_library"},{"name":"internal","reason":"unpublished"}]' "skipped crates: --json lists them with a reason"
+summary_file=$(mktemp)
+(cd "$repo" && GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$summary_file" "$ZC" "$base" "$head" >/dev/null 2>&1)
+assert_contains "$(cat "$summary_file")" 'Skipped, no public API: `fuzz` (no library target), `internal` (publish = false)' "skipped crates: the step summary lists them"
+rm -f "$summary_file"
+rm -rf "$repo"
+
 echo ""
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]

@@ -297,6 +297,38 @@ pub enum CrateStatus {
     Error,
 }
 
+/// Why a workspace member is left out of the public-API analysis.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SkipReason {
+    /// No library target, so there is no public API to document.
+    NoLibrary,
+    /// `publish = false`, so no downstream crate can depend on its API.
+    Unpublished,
+}
+
+impl SkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkipReason::NoLibrary => "no_library",
+            SkipReason::Unpublished => "unpublished",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            SkipReason::NoLibrary => "no library target",
+            SkipReason::Unpublished => "publish = false",
+        }
+    }
+}
+
+/// A workspace member left out of the public-API analysis.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkippedCrate {
+    pub name: String,
+    pub reason: SkipReason,
+}
+
 /// Stage at which per-crate analysis failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ErrorStage {
@@ -443,6 +475,8 @@ pub struct Report {
     pub deps: DepDiff,
     pub crates: Vec<CrateResult>,
     pub crate_count: usize,
+    /// Workspace members with no public API to analyse.
+    pub skipped: Vec<SkippedCrate>,
     pub values: Vec<ValueChange>,
     pub docs: Vec<DocChange>,
     pub removed_total: usize,

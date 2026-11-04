@@ -79,6 +79,10 @@ pub fn step_summary(report: &Report) -> String {
     if report.features != FeaturePolicy::All {
         let _ = writeln!(out, "Features: `{}`\n", report.features);
     }
+    if !report.skipped.is_empty() {
+        let skipped = crate::render::skipped_list(report, |name| format!("`{name}`"));
+        let _ = writeln!(out, "Skipped, no public API: {skipped}\n");
+    }
 
     out.push_str("| Total | Count |\n| --- | ---: |\n");
     for (label, count) in [

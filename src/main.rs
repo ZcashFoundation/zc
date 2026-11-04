@@ -443,13 +443,14 @@ fn run() -> Result<i32, String> {
 
     // ── transitive (Cargo.lock) diff ──────────────────────────────────
     let all_crates = cargo_meta::workspace_crate_names(&ctx.head_worktree);
+    let api_crates = cargo_meta::api_crates(&ctx.head_worktree);
     if all_crates.is_empty() {
         eprintln!(
             "{}warning:{} no workspace crates discovered via cargo metadata",
             ctx.style.yellow, ctx.style.reset
         );
     }
-    let crate_count = all_crates.len();
+    let crate_count = api_crates.analysed.len();
 
     if ctx.opts.with_lock {
         // Direct workspace deps (and workspace members) are suppressed: the section above
@@ -476,7 +477,7 @@ fn run() -> Result<i32, String> {
     );
 
     ctx.progress.start();
-    let crates = api::analyze(&ctx, &all_crates, &pubdep_tables);
+    let crates = api::analyze(&ctx, &api_crates.analysed, &pubdep_tables);
     ctx.progress.clear();
 
     let removed_total: usize = crates.iter().map(|c| c.removed).sum();
@@ -518,6 +519,7 @@ fn run() -> Result<i32, String> {
         deps: dep_diff,
         crates,
         crate_count,
+        skipped: api_crates.skipped,
         values,
         docs,
         removed_total,

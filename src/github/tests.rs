@@ -20,6 +20,7 @@ fn report() -> Report {
         deps: DepDiff::default(),
         crates: Vec::new(),
         crate_count: 2,
+        skipped: Vec::new(),
         values: Vec::new(),
         docs: Vec::new(),
         removed_total: 0,
@@ -207,4 +208,24 @@ fn the_step_summary_carries_the_verdict_totals_and_changed_crates() {
 #[test]
 fn a_report_without_changed_crates_has_no_per_crate_table() {
     assert!(!step_summary(&report()).contains("| Crate |"));
+}
+
+#[test]
+fn the_step_summary_names_skipped_crates_and_why() {
+    let mut with_skipped = report();
+    with_skipped.skipped = vec![
+        crate::model::SkippedCrate {
+            name: "zebra-fuzz-targets".to_string(),
+            reason: crate::model::SkipReason::NoLibrary,
+        },
+        crate::model::SkippedCrate {
+            name: "internal".to_string(),
+            reason: crate::model::SkipReason::Unpublished,
+        },
+    ];
+
+    assert!(step_summary(&with_skipped).contains(
+        "Skipped, no public API: `zebra-fuzz-targets` (no library target), `internal` (publish = false)"
+    ));
+    assert!(!step_summary(&report()).contains("Skipped"));
 }

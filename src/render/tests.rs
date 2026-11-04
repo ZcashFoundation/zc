@@ -46,6 +46,7 @@ fn json_shape_and_field_order_match_the_documented_schema() {
             pubdep: Vec::new(),
         }],
         crate_count: 1,
+        skipped: Vec::new(),
         values: Vec::new(),
         docs: Vec::new(),
         removed_total: 0,
@@ -94,7 +95,8 @@ fn json_shape_and_field_order_match_the_documented_schema() {
       "status": "ok",
       "error": null
     }
-  ]
+  ],
+  "skipped": []
 }"#
     );
 }

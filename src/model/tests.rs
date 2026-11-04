@@ -20,6 +20,7 @@ fn report() -> Report {
         deps: DepDiff::default(),
         crates: Vec::new(),
         crate_count: 1,
+        skipped: Vec::new(),
         values: Vec::new(),
         docs: Vec::new(),
         removed_total: 0,

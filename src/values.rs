@@ -7,7 +7,7 @@ use serde::de::{MapAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::cargo_meta::workspace_crate_names;
+use crate::cargo_meta::api_crates;
 use crate::ctx::Ctx;
 use crate::git;
 use crate::model::{DocChange, ValueChange};
@@ -112,7 +112,7 @@ fn dump_index(
         return Vec::new();
     }
 
-    let crates = workspace_crate_names(&worktree);
+    let crates = api_crates(&worktree).analysed;
     let mut rows = Vec::new();
     let mut failed = false;
     for (index, crate_name) in crates.iter().enumerate() {

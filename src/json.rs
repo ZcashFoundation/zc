@@ -19,6 +19,13 @@ struct JsonReport<'a> {
     docs: Vec<Doc<'a>>,
     public_dep_breaks: Vec<PublicDepBreak<'a>>,
     crates: Vec<Crate<'a>>,
+    skipped: Vec<Skipped<'a>>,
+}
+
+#[derive(Serialize)]
+struct Skipped<'a> {
+    name: &'a str,
+    reason: &'static str,
 }
 
 #[derive(Serialize)]
@@ -238,6 +245,14 @@ pub fn emit(report: &Report) -> String {
         docs,
         public_dep_breaks,
         crates: report.crates.iter().map(Crate::from).collect(),
+        skipped: report
+            .skipped
+            .iter()
+            .map(|skipped| Skipped {
+                name: &skipped.name,
+                reason: skipped.reason.as_str(),
+            })
+            .collect(),
     };
     serde_json::to_string_pretty(&document).unwrap_or_else(|_| "{}".to_string())
 }

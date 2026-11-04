@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ctx::Ctx;
 use crate::git;
-use crate::model::{is_test_crate, DepKind, DepRecord, PerCrateDep, Scope};
+use crate::model::{
+    is_test_crate, DepKind, DepRecord, PerCrateDep, Scope, SkipReason, SkippedCrate,
+};
 
 #[derive(Deserialize)]
 struct Metadata {
@@ -25,6 +27,48 @@ struct Package {
     dependencies: Vec<Dependency>,
     #[serde(default)]
     features: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    targets: Vec<Target>,
+    /// `None` publishes anywhere; an empty list is `publish = false`.
+    #[serde(default)]
+    publish: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct Target {
+    #[serde(default)]
+    kind: Vec<String>,
+}
+
+/// Target kinds that `cargo rustdoc --lib` can document.
+const LIBRARY_KINDS: &[&str] = &["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
+
+impl Package {
+    fn has_library(&self) -> bool {
+        self.targets.iter().any(|target| {
+            target
+                .kind
+                .iter()
+                .any(|kind| LIBRARY_KINDS.contains(&kind.as_str()))
+        })
+    }
+
+    fn skip_reason(&self) -> Option<SkipReason> {
+        if !self.has_library() {
+            Some(SkipReason::NoLibrary)
+        } else if self.publish.as_ref().is_some_and(Vec::is_empty) {
+            Some(SkipReason::Unpublished)
+        } else {
+            None
+        }
+    }
+}
+
+/// Workspace members split into those with a public API to analyse and those without.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ApiCrates {
+    pub analysed: Vec<String>,
+    pub skipped: Vec<SkippedCrate>,
 }
 
 /// Each workspace crate's `[features]` table, by crate name.
@@ -74,37 +118,66 @@ struct Aggregate {
     features: BTreeSet<String>,
 }
 
-/// Lists the names of workspace-member crates in sorted order.
-pub fn workspace_crate_names(workspace_dir: &Path) -> Vec<String> {
-    let manifest = workspace_dir.join("Cargo.toml");
-    let Ok(output) = Command::new("cargo")
+/// Reads `cargo metadata --no-deps` for `workspace_dir`, or `None` if it fails.
+fn read_metadata(workspace_dir: &Path) -> Option<Metadata> {
+    let output = Command::new("cargo")
         .arg("metadata")
         .arg("--manifest-path")
-        .arg(manifest)
+        .arg(workspace_dir.join("Cargo.toml"))
         .arg("--no-deps")
         .arg("--format-version")
         .arg("1")
         .stderr(Stdio::null())
         .output()
-    else {
-        return Vec::new();
-    };
+        .ok()?;
     if !output.status.success() {
-        return Vec::new();
+        return None;
     }
-    let Ok(metadata) = serde_json::from_slice::<Metadata>(&output.stdout) else {
-        return Vec::new();
-    };
+    serde_json::from_slice(&output.stdout).ok()
+}
 
+/// The workspace-member packages, sorted by name.
+fn workspace_members(metadata: Metadata) -> Vec<Package> {
     let members: HashSet<_> = metadata.workspace_members.into_iter().collect();
-    let mut names: Vec<_> = metadata
+    let mut packages: Vec<_> = metadata
         .packages
         .into_iter()
         .filter(|package| members.contains(&package.id))
-        .map(|package| package.name)
         .collect();
-    names.sort();
-    names
+    packages.sort_by(|a, b| a.name.cmp(&b.name));
+    packages
+}
+
+/// Lists the names of workspace-member crates in sorted order.
+pub fn workspace_crate_names(workspace_dir: &Path) -> Vec<String> {
+    read_metadata(workspace_dir)
+        .map(workspace_members)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|package| package.name)
+        .collect()
+}
+
+/// Lists the workspace members whose public API is analysed, and the ones skipped, in sorted
+/// order.
+pub fn api_crates(workspace_dir: &Path) -> ApiCrates {
+    read_metadata(workspace_dir)
+        .map(classify_api_crates)
+        .unwrap_or_default()
+}
+
+fn classify_api_crates(metadata: Metadata) -> ApiCrates {
+    let mut crates = ApiCrates::default();
+    for package in workspace_members(metadata) {
+        match package.skip_reason() {
+            Some(reason) => crates.skipped.push(SkippedCrate {
+                name: package.name,
+                reason,
+            }),
+            None => crates.analysed.push(package.name),
+        }
+    }
+    crates
 }
 
 /// Reads every workspace crate's `[features]` table in `workspace_dir`.
@@ -491,3 +564,7 @@ fn decode_per_crate_cache(contents: &str) -> Option<Vec<PerCrateDep>> {
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "cargo_meta/tests.rs"]
+mod tests;
