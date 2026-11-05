@@ -7,7 +7,7 @@ fn metadata(json: &str) -> Metadata {
 }
 
 #[test]
-fn members_without_a_public_api_are_skipped_with_a_reason() {
+fn members_without_library_targets_are_skipped_with_a_reason() {
     let crates = classify_api_crates(metadata(
         r#"{
             "workspace_members": ["lib-id", "bin-id", "private-id", "macro-id", "both-id"],
@@ -25,12 +25,12 @@ fn members_without_a_public_api_are_skipped_with_a_reason() {
     assert_eq!(
         crates,
         ApiCrates {
-            analysed: vec!["derive".to_string(), "zebra-lib".to_string()],
+            analysed: vec![
+                "derive".to_string(),
+                "internal".to_string(),
+                "zebra-lib".to_string(),
+            ],
             skipped: vec![
-                SkippedCrate {
-                    name: "internal".to_string(),
-                    reason: SkipReason::Unpublished,
-                },
                 SkippedCrate {
                     name: "tool".to_string(),
                     reason: SkipReason::NoLibrary,
@@ -45,7 +45,7 @@ fn members_without_a_public_api_are_skipped_with_a_reason() {
 }
 
 #[test]
-fn a_registry_restricted_crate_is_still_published() {
+fn registry_restricted_libraries_are_analysed() {
     let crates = classify_api_crates(metadata(
         r#"{
             "workspace_members": ["id"],

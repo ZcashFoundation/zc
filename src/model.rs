@@ -302,22 +302,18 @@ pub enum CrateStatus {
 pub enum SkipReason {
     /// No library target, so there is no public API to document.
     NoLibrary,
-    /// `publish = false`, so no downstream crate can depend on its API.
-    Unpublished,
 }
 
 impl SkipReason {
     pub fn as_str(self) -> &'static str {
         match self {
             SkipReason::NoLibrary => "no_library",
-            SkipReason::Unpublished => "unpublished",
         }
     }
 
     pub fn describe(self) -> &'static str {
         match self {
             SkipReason::NoLibrary => "no library target",
-            SkipReason::Unpublished => "publish = false",
         }
     }
 }

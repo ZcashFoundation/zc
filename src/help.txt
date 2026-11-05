@@ -18,8 +18,8 @@ sections are emitted (sections 2 and 4 are opt-in):
      section 1.
 
   3. Per-crate public API diff via `cargo public-api`. Crates with no
-     library target or with `publish = false` have no public API to diff;
-     they are skipped and listed in the summary.
+     library target are skipped and listed in the summary. Libraries with
+     `publish = false` are still analysed for path, Git, and workspace consumers.
 
   4. Optional const/static value + doc-comment diff (--with-values).
      cargo-public-api compares signatures only, so a `pub const` whose value
@@ -124,7 +124,7 @@ OPTIONS
                            }
                          }
                        ],
-                       skipped: [ {name, reason} ]  # no_library|unpublished
+                       skipped: [ {name, reason} ]  # no_library
                      }
                    Error `stage` is baseline_build, head_build, or diff.
                    zc never falls back to fewer features on its own, because

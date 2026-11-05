@@ -6,7 +6,7 @@ consumers.
 
 `zc` wraps [`cargo public-api`](https://github.com/cargo-public-api/cargo-public-api)
 and adds workspace-wide dependency, lockfile, and const/value diffing on top, so
-a single command tells you whether a branch breaks your published surface.
+a single command tells you whether a branch breaks your public surface.
 
 ## What it reports
 
@@ -16,8 +16,9 @@ a single command tells you whether a branch breaks your published surface.
 2. **Transitive `Cargo.lock` diff** (`--with-lock`) — transitive version changes,
    each annotated with the direct deps that pull it in.
 3. **Per-crate public-API diff** (`cargo public-api`) — removed / changed / added
-   items per workspace crate. Crates with no library target or with
-   `publish = false` are skipped and listed in the summary. Built with `--all-features` by default, so
+   items per workspace crate. Crates with no library target are skipped and listed
+   in the summary. Libraries are analysed even with `publish = false`: path, Git,
+   and workspace consumers can still depend on their API. Built with `--all-features` by default, so
    feature-gated public items are never silently missed; `--features` narrows
    that when a workspace has test-only or fuzz-only features. If a crate cannot be analyzed, zc reports
    the failing stage, stderr tail, command, and hint instead of returning an empty
@@ -151,9 +152,8 @@ Top-level fields:
   requirement text does not settle, such as a narrowed or widened version ceiling.
   Only `breaking` entries count toward `totals.public_dep_breaking` and the verdict.
 - `crates`: one entry per analysed workspace crate, sorted by crate name
-- `skipped`: `[{name, reason}]` — workspace crates with no public API to analyse.
-  Reason `no_library` is a crate without a library target; `unpublished` is one
-  with `publish = false`.
+- `skipped`: `[{name, reason}]` — workspace crates without a library target.
+  The reason is `no_library`; unpublished libraries are still analysed.
 
 A crate error has this shape:
 

@@ -29,9 +29,6 @@ struct Package {
     features: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     targets: Vec<Target>,
-    /// `None` publishes anywhere; an empty list is `publish = false`.
-    #[serde(default)]
-    publish: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -51,16 +48,6 @@ impl Package {
                 .iter()
                 .any(|kind| LIBRARY_KINDS.contains(&kind.as_str()))
         })
-    }
-
-    fn skip_reason(&self) -> Option<SkipReason> {
-        if !self.has_library() {
-            Some(SkipReason::NoLibrary)
-        } else if self.publish.as_ref().is_some_and(Vec::is_empty) {
-            Some(SkipReason::Unpublished)
-        } else {
-            None
-        }
     }
 }
 
@@ -169,12 +156,13 @@ pub fn api_crates(workspace_dir: &Path) -> ApiCrates {
 fn classify_api_crates(metadata: Metadata) -> ApiCrates {
     let mut crates = ApiCrates::default();
     for package in workspace_members(metadata) {
-        match package.skip_reason() {
-            Some(reason) => crates.skipped.push(SkippedCrate {
+        if package.has_library() {
+            crates.analysed.push(package.name);
+        } else {
+            crates.skipped.push(SkippedCrate {
                 name: package.name,
-                reason,
-            }),
-            None => crates.analysed.push(package.name),
+                reason: SkipReason::NoLibrary,
+            });
         }
     }
     crates
