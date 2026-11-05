@@ -72,6 +72,11 @@ steps:
 
 The action installs the `cargo-public-api` and Rust nightly versions tested with that `zc` release. It compares the pull request head with its branch point from the baseline, then fails with the same exit-code contract as the CLI. Set `head` when both refs must be compared literally, or enable `with-lock` and `with-values` for the optional analyses. `with-changelog` adds a Keep a Changelog draft for a later step to read.
 
+The action caches the pinned `cargo-public-api` executable for Linux/glibc Cargo-bin installs,
+separated by OS release, libc version, and architecture. Other platforms, installer fallback
+paths, and installation-root overrides install the tool without caching. Push events publish
+cache entries; pull requests only restore them. Cache misses install the tool as usual.
+
 `fail-on` chooses which findings fail the step: `breaking` (the default), `api-breaking` to let dependency, value, and doc changes pass, `error` for analysis failures only, or `none`. Findings are reported the same way in every mode.
 
 `features` chooses which Cargo features each crate is analysed with: `all` (the default), `default`, or `exclude:<feature>[,<feature>...]`. Use `exclude:` when some features only exist for tests or fuzzing and should not count as public API:

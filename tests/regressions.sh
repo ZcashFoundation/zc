@@ -27,6 +27,56 @@ regression_output() { # action output file, key
     done <"$1"
 }
 
+regression_action_cache() { # action file, fixture directory
+    [[ "$(uname -s)" == Linux ]] && getconf GNU_LIBC_VERSION >/dev/null 2>&1 || return 0
+    local action_file=$1 root=$2 line body='' reading=false mode output path rc
+    local cargo_home="$root/cache-cargo" rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+    local cargo_path original_path=$PATH runner_os
+    local -a root_override
+    cargo_path=$(type -P cargo)
+    mkdir -p "$cargo_home/bin" "$root/cache-home"
+    ln -s "$cargo_path" "$cargo_home/bin/cargo"
+
+    # Run the real eligibility body: unsafe installation layouts must not advertise a cache path.
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$line" = '    - name: Identify cargo-public-api cache' ]; then
+            reading=header
+        elif [ "$reading" = header ] && [ "$line" = '      run: |' ]; then
+            reading=true
+        elif [ "$reading" = true ]; then
+            [[ -z "$line" || "$line" == '        '* ]] || break
+            body+="${line#        }"$'\n'
+        fi
+    done <"$action_file"
+
+    for mode in custom-home env-root empty-root config-root invalid-config fallback other-os; do
+        output="$root/cache-$mode.output"
+        rm -f "$cargo_home/config.toml" "$output"
+        root_override=()
+        path="$cargo_home/bin:$original_path"
+        runner_os=Linux
+        case "$mode" in
+            env-root) root_override=("CARGO_INSTALL_ROOT=$root/install-root") ;;
+            empty-root) root_override=('CARGO_INSTALL_ROOT=') ;;
+            config-root) printf '[install]\nroot = "%s"\n' "$root/install-root" >"$cargo_home/config.toml" ;;
+            invalid-config) printf 'invalid TOML\n' >"$cargo_home/config.toml" ;;
+            fallback) path=$original_path ;;
+            other-os) runner_os=Darwin ;;
+        esac
+        (cd "$root" && env -u CARGO_INSTALL_ROOT HOME="$root/cache-home" CARGO_HOME="$cargo_home" \
+            RUSTUP_HOME="$rustup_home" PATH="$path" RUNNER_OS="$runner_os" GITHUB_OUTPUT="$output" \
+            "${root_override[@]}" bash -c "$body")
+        rc=$?
+        path=''
+        if [ -f "$output" ]; then path=$(regression_output "$output" path); fi
+        if [ "$mode" = custom-home ]; then
+            assert_eq "$rc:$path" "0:$cargo_home/bin/cargo-public-api" "action cache: custom Cargo home is the restore destination"
+        else
+            assert_eq "$rc:$path" '0:' "action cache: $mode retains installation without restoring a binary"
+        fi
+    done
+}
+
 audit_regressions() {
     local audit_root repo base head added_head json out rc member mode before after source consumer
     local oldreq newreq body line action_file reading report_first report_second notes_first
@@ -42,6 +92,7 @@ audit_regressions() {
     action_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/action.yml"
 
     echo "audited correctness regressions"
+    regression_action_cache "$action_file" "$audit_root"
 
     # Analysis only removes its own temporary worktrees, not unrelated offline checkouts.
     repo=$(new_repo 'pub fn original() {}')
