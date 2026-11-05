@@ -8,6 +8,7 @@ all-features = true
 [advisories]
 # Vulnerabilities and unsound crates always fail; yanked crates fail too.
 yanked = "deny"
+unsound = "all"
 
 [licenses]
 allow = ["Apache-2.0", "MIT", "Unicode-3.0", "Unlicense"]

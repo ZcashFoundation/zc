@@ -1,21 +1,18 @@
 //! Public constant, static, and documentation diffs from rustdoc JSON.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 
-use serde::de::{MapAccess, Visitor};
-use serde::Deserialize;
 use serde_json::Value;
 
-use crate::cargo_meta::workspace_crate_names;
 use crate::ctx::Ctx;
-use crate::git;
 use crate::model::{DocChange, ValueChange};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ValueRow {
     crate_name: String,
     path: String,
+    identity: Option<crate::traitmap::ImplIdentity>,
     ty: String,
     value: String,
 }
@@ -24,48 +21,8 @@ struct ValueRow {
 struct DocRow {
     crate_name: String,
     path: String,
+    identity: Option<crate::traitmap::ImplIdentity>,
     docs: String,
-}
-
-#[derive(Default)]
-struct OrderedEntries(Vec<(String, Value)>);
-
-impl<'de> Deserialize<'de> for OrderedEntries {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct EntriesVisitor;
-
-        impl<'de> Visitor<'de> for EntriesVisitor {
-            type Value = OrderedEntries;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a JSON object")
-            }
-
-            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
-            where
-                M: MapAccess<'de>,
-            {
-                let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
-                while let Some(entry) = map.next_entry()? {
-                    entries.push(entry);
-                }
-                Ok(OrderedEntries(entries))
-            }
-        }
-
-        deserializer.deserialize_map(EntriesVisitor)
-    }
-}
-
-#[derive(Deserialize, Default)]
-struct RustdocIndex {
-    #[serde(default)]
-    index: HashMap<String, Value>,
-    #[serde(default)]
-    paths: OrderedEntries,
 }
 
 enum IndexRow {
@@ -73,95 +30,105 @@ enum IndexRow {
     Doc(DocRow),
 }
 
-/// Computes value and documentation changes, preserving the head rustdoc path order.
-pub fn diff(ctx: &Ctx, crate_count: usize) -> (Vec<ValueChange>, Vec<DocChange>) {
-    let target = ctx.tmp.dir.join("values-target");
-    let _ = fs::create_dir_all(&target);
-
+/// Computes value and documentation changes in deterministic public-path order.
+pub fn diff(ctx: &Ctx, crate_count: usize) -> Result<(Vec<ValueChange>, Vec<DocChange>), String> {
     ctx.progress.start();
-    let base = dump_index(ctx, &ctx.refs.baseline_sha, "base", crate_count, &target);
-    let head = dump_index(ctx, &ctx.refs.head_sha, "head", crate_count, &target);
+    let result = (|| {
+        let base = dump_index(ctx, false, crate_count)?;
+        let head = dump_index(ctx, true, crate_count)?;
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for (crate_name, head_root) in &head {
+            let Some(base_root) = base.get(crate_name) else {
+                continue;
+            };
+            let (old, new) = extract_pair(base_root, head_root, crate_name);
+            before.extend(old);
+            after.extend(new);
+        }
+        compare(&before, &after)
+    })();
     ctx.progress.clear();
-    compare(&base, &head)
+    result
 }
 
 fn dump_index(
     ctx: &Ctx,
-    ref_sha: &str,
-    ref_label: &str,
+    head: bool,
     crate_count: usize,
-    target: &std::path::Path,
-) -> Vec<IndexRow> {
-    let cache_name = format!(
-        "{}.{}.{}.values.tsv",
-        ref_sha, ctx.cache.script_hash, ctx.cache.api_fp
-    );
-    if let Some(cached) = ctx.cache.read_if_present(&cache_name) {
-        return parse_tsv(&cached);
-    }
-
-    let worktree = match ctx.tmp.sub("values") {
-        Ok(path) => path,
-        Err(_) => return Vec::new(),
+) -> Result<BTreeMap<String, Value>, String> {
+    let (crates, worktree, target, sha, label) = if head {
+        (
+            &ctx.head_crates,
+            &ctx.head_worktree,
+            &ctx.head_target,
+            &ctx.refs.head_sha,
+            "head",
+        )
+    } else {
+        (
+            &ctx.baseline_crates,
+            &ctx.baseline_worktree,
+            &ctx.baseline_target,
+            &ctx.refs.baseline_sha,
+            "base",
+        )
     };
-    if git::worktree_add(&worktree, ref_sha).is_err() {
-        eprintln!(
-            "{}warning:{} could not create worktree for '{}' (value diff)",
-            ctx.style.yellow, ctx.style.reset, ref_sha
-        );
-        return Vec::new();
-    }
-
-    let crates = workspace_crate_names(&worktree);
-    let mut rows = Vec::new();
-    let mut failed = false;
-    for (index, crate_name) in crates.iter().enumerate() {
+    let mut roots = BTreeMap::new();
+    for (index, (crate_name, _)) in crates
+        .iter()
+        .filter(|(_, metadata)| metadata.lib_name.is_some())
+        .enumerate()
+    {
         ctx.progress.set(&format!(
-            "--with-values: rustdoc JSON [{ref_label} {}/{}] {crate_name}",
+            "--with-values: rustdoc JSON [{label} {}/{}] {crate_name}",
             index + 1,
             crate_count
         ));
-        match crate::api::rustdoc_json(ctx, crate_name, &worktree, target, ref_sha) {
-            Ok(path) => {
-                if let Ok(json) = fs::read_to_string(path) {
-                    rows.extend(extract(&json, crate_name));
-                }
-            }
-            Err(_) => failed = true,
-        }
+        let path = crate::api::rustdoc_json(ctx, crate_name, worktree, target, sha)?;
+        let json = fs::read_to_string(&path)
+            .map_err(|err| format!("cannot read rustdoc JSON {}: {err}", path.display()))?;
+        roots.insert(crate_name.clone(), crate::rustdoc::parse_json(&json)?);
     }
-    git::worktree_remove(&worktree);
-
-    let tsv = render_tsv(&rows);
-    if !failed {
-        ctx.cache.write_atomic(&cache_name, &tsv);
-    }
-    parse_tsv(&tsv)
+    Ok(roots)
 }
 
-fn extract(json: &str, crate_name: &str) -> Vec<IndexRow> {
-    let Ok(root) = serde_json::from_str::<RustdocIndex>(json) else {
-        return Vec::new();
-    };
+fn extract_pair(base: &Value, head: &Value, crate_name: &str) -> (Vec<IndexRow>, Vec<IndexRow>) {
+    let old = crate::rustdoc::public_exports(base);
+    let new = crate::rustdoc::public_exports(head);
+    let shared: HashSet<_> = old
+        .items
+        .keys()
+        .filter(|path| new.items.contains_key(*path))
+        .cloned()
+        .collect();
+    (
+        extract_items(
+            crate::rustdoc::public_items_for_comparison(base, old, Some(&shared)),
+            crate_name,
+        ),
+        extract_items(
+            crate::rustdoc::public_items_for_comparison(head, new, Some(&shared)),
+            crate_name,
+        ),
+    )
+}
+
+#[cfg(test)]
+fn extract(json: &str, crate_name: &str) -> Result<Vec<IndexRow>, String> {
+    let root = crate::rustdoc::parse_json(json)?;
+    Ok(extract_items(
+        crate::rustdoc::public_items(&root),
+        crate_name,
+    ))
+}
+
+fn extract_items(public: crate::rustdoc::PublicItems<'_>, crate_name: &str) -> Vec<IndexRow> {
     let mut rows = Vec::new();
-    for (id, path_entry) in root.paths.0 {
-        let Some(item) = root.index.get(&id) else {
-            continue;
-        };
-        if item.get("visibility").and_then(Value::as_str) != Some("public") {
-            continue;
-        }
-        let Some(path) = path_entry.get("path").and_then(Value::as_array) else {
-            continue;
-        };
-        let Some(path) = path
-            .iter()
-            .map(Value::as_str)
-            .collect::<Option<Vec<_>>>()
-            .map(|segments| segments.join("::"))
-        else {
-            continue;
-        };
+    let mut impl_identities = public.impl_identities;
+    let items = public.items;
+    for (path, item) in items {
+        let identity = impl_identities.remove(&path);
         let inner = item.get("inner").and_then(Value::as_object);
 
         if let Some(constant) = inner
@@ -186,9 +153,27 @@ fn extract(json: &str, crate_name: &str) -> Vec<IndexRow> {
             rows.push(IndexRow::Value(ValueRow {
                 crate_name: crate_name.to_string(),
                 path: path.clone(),
+                identity: identity.clone(),
                 ty,
                 value,
             }));
+        } else if let Some(constant) = inner
+            .and_then(|inner| inner.get("assoc_const"))
+            .and_then(Value::as_object)
+        {
+            // A trait constant without a default has no value to compare.
+            if let Some(value) = constant.get("value").filter(|value| !value.is_null()) {
+                rows.push(IndexRow::Value(ValueRow {
+                    crate_name: crate_name.to_string(),
+                    path: path.clone(),
+                    identity: identity.clone(),
+                    ty: constant
+                        .get("type")
+                        .map(type_text)
+                        .unwrap_or_else(|| "null".to_string()),
+                    value: jq_text(value),
+                }));
+            }
         } else if let Some(static_item) = inner
             .and_then(|inner| inner.get("static"))
             .and_then(Value::as_object)
@@ -205,22 +190,23 @@ fn extract(json: &str, crate_name: &str) -> Vec<IndexRow> {
             rows.push(IndexRow::Value(ValueRow {
                 crate_name: crate_name.to_string(),
                 path: path.clone(),
+                identity: identity.clone(),
                 ty,
                 value,
             }));
         }
 
-        if let Some(docs) = item
-            .get("docs")
-            .and_then(Value::as_str)
-            .filter(|docs| !docs.is_empty())
-        {
-            rows.push(IndexRow::Doc(DocRow {
-                crate_name: crate_name.to_string(),
-                path,
-                docs: base64(docs.as_bytes()),
-            }));
-        }
+        // Keep empty docs too: adding or removing docs on a surviving item is a change.
+        rows.push(IndexRow::Doc(DocRow {
+            crate_name: crate_name.to_string(),
+            path,
+            identity,
+            docs: item
+                .get("docs")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }));
     }
     rows
 }
@@ -233,7 +219,7 @@ fn type_text(value: &Value) -> String {
         .or_else(|| {
             value
                 .get("resolved_path")
-                .and_then(|path| path.get("name"))
+                .and_then(|path| path.get("path").or_else(|| path.get("name")))
                 .filter(|value| !value.is_null())
                 .map(jq_text)
         })
@@ -247,22 +233,42 @@ fn jq_text(value: &Value) -> String {
     }
 }
 
-fn compare(base: &[IndexRow], head: &[IndexRow]) -> (Vec<ValueChange>, Vec<DocChange>) {
+fn compare(
+    base: &[IndexRow],
+    head: &[IndexRow],
+) -> Result<(Vec<ValueChange>, Vec<DocChange>), String> {
     let mut base_values = HashMap::new();
     let mut base_docs = HashMap::new();
+    let mut value_origins = HashMap::new();
+    let mut doc_origins = HashMap::new();
+    let mut value_identities = HashMap::new();
+    let mut doc_identities = HashMap::new();
+    // ponytail: scan equal-shape impl candidates; index slots if alias-heavy crates make this hot.
     for row in base {
         match row {
             IndexRow::Value(row) => {
-                base_values.insert(
-                    (row.crate_name.as_str(), row.path.as_str()),
-                    (row.ty.as_str(), row.value.as_str()),
-                );
+                base_values.insert((row.crate_name.as_str(), row.path.as_str()), row);
+                if let Some(identity) = &row.identity {
+                    value_origins
+                        .entry((row.crate_name.as_str(), identity.origin.as_str()))
+                        .or_insert(row);
+                    value_identities
+                        .entry((row.crate_name.as_str(), identity.shape.as_str()))
+                        .or_insert_with(Vec::new)
+                        .push(row);
+                }
             }
             IndexRow::Doc(row) => {
-                base_docs.insert(
-                    (row.crate_name.as_str(), row.path.as_str()),
-                    row.docs.as_str(),
-                );
+                base_docs.insert((row.crate_name.as_str(), row.path.as_str()), row);
+                if let Some(identity) = &row.identity {
+                    doc_origins
+                        .entry((row.crate_name.as_str(), identity.origin.as_str()))
+                        .or_insert(row);
+                    doc_identities
+                        .entry((row.crate_name.as_str(), identity.shape.as_str()))
+                        .or_insert_with(Vec::new)
+                        .push(row);
+                }
             }
         }
     }
@@ -272,105 +278,129 @@ fn compare(base: &[IndexRow], head: &[IndexRow]) -> (Vec<ValueChange>, Vec<DocCh
     for row in head {
         match row {
             IndexRow::Value(row) => {
-                if let Some((ty, old)) =
-                    base_values.get(&(row.crate_name.as_str(), row.path.as_str()))
-                {
-                    if *old != row.value {
+                let direct = base_values
+                    .get(&(row.crate_name.as_str(), row.path.as_str()))
+                    .copied();
+                let candidates = row.identity.as_ref().and_then(|identity| {
+                    value_identities.get(&(row.crate_name.as_str(), identity.shape.as_str()))
+                });
+                let old = direct.or_else(|| {
+                    row.identity.as_ref().and_then(|identity| {
+                        value_origins
+                            .get(&(row.crate_name.as_str(), identity.origin.as_str()))
+                            .copied()
+                    })
+                });
+                let mut shared = false;
+                match (&row.identity, candidates) {
+                    (Some(identity), Some(candidates))
+                        if direct.is_none() || identity.has_alternative_slots() =>
+                    {
+                        for old in candidates {
+                            let Some(old_identity) = &old.identity else {
+                                continue;
+                            };
+                            if old.value == row.value {
+                                shared |= old_identity.matches(identity);
+                                continue;
+                            }
+                            let Some(path) = old_identity.shared_path(identity) else {
+                                continue;
+                            };
+                            shared = true;
+                            if direct.is_some() && path == row.path {
+                                continue;
+                            }
+                            values.push(ValueChange {
+                                crate_name: row.crate_name.clone(),
+                                path,
+                                ty: old.ty.clone(),
+                                old: old.value.clone(),
+                                new: row.value.clone(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                match old {
+                    Some(old) if (direct.is_some() || !shared) && old.value != row.value => {
                         values.push(ValueChange {
                             crate_name: row.crate_name.clone(),
                             path: row.path.clone(),
-                            ty: (*ty).to_string(),
-                            old: (*old).to_string(),
+                            ty: old.ty.clone(),
+                            old: old.value.clone(),
                             new: row.value.clone(),
                         });
                     }
+                    _ => {}
                 }
             }
             IndexRow::Doc(row) => {
-                if let Some(old) = base_docs.get(&(row.crate_name.as_str(), row.path.as_str())) {
-                    if *old != row.docs {
-                        docs.push(DocChange {
-                            crate_name: row.crate_name.clone(),
-                            path: row.path.clone(),
-                        });
+                let direct = base_docs
+                    .get(&(row.crate_name.as_str(), row.path.as_str()))
+                    .copied();
+                let candidates = row.identity.as_ref().and_then(|identity| {
+                    doc_identities.get(&(row.crate_name.as_str(), identity.shape.as_str()))
+                });
+                let old = direct.or_else(|| {
+                    row.identity.as_ref().and_then(|identity| {
+                        doc_origins
+                            .get(&(row.crate_name.as_str(), identity.origin.as_str()))
+                            .copied()
+                    })
+                });
+                let mut shared = false;
+                match (&row.identity, candidates) {
+                    (Some(identity), Some(candidates))
+                        if direct.is_none() || identity.has_alternative_slots() =>
+                    {
+                        for old in candidates {
+                            let Some(old_identity) = &old.identity else {
+                                continue;
+                            };
+                            if old.docs == row.docs {
+                                shared |= old_identity.matches(identity);
+                                continue;
+                            }
+                            let Some(path) = old_identity.shared_path(identity) else {
+                                continue;
+                            };
+                            shared = true;
+                            if direct.is_some() && path == row.path {
+                                continue;
+                            }
+                            docs.push(DocChange {
+                                crate_name: row.crate_name.clone(),
+                                path,
+                            });
+                        }
                     }
+                    _ => {}
+                }
+                if (direct.is_some() || !shared) && old.is_some_and(|old| old.docs != row.docs) {
+                    docs.push(DocChange {
+                        crate_name: row.crate_name.clone(),
+                        path: row.path.clone(),
+                    });
                 }
             }
         }
     }
-    (values, docs)
-}
-
-fn render_tsv(rows: &[IndexRow]) -> String {
-    let mut output = String::new();
-    for row in rows {
-        let fields: Vec<&str> = match row {
-            IndexRow::Value(row) => vec!["V", &row.crate_name, &row.path, &row.ty, &row.value],
-            IndexRow::Doc(row) => vec!["D", &row.crate_name, &row.path, &row.docs],
-        };
-        output.push_str(
-            &fields
-                .into_iter()
-                .map(tsv_escape)
-                .collect::<Vec<_>>()
-                .join("\t"),
-        );
-        output.push('\n');
-    }
-    output
-}
-
-fn parse_tsv(contents: &str) -> Vec<IndexRow> {
-    let mut rows = Vec::new();
-    for line in contents.lines() {
-        let fields: Vec<&str> = line.split('\t').collect();
-        match fields.as_slice() {
-            ["V", crate_name, path, ty, value] => rows.push(IndexRow::Value(ValueRow {
-                crate_name: (*crate_name).to_string(),
-                path: (*path).to_string(),
-                ty: (*ty).to_string(),
-                value: (*value).to_string(),
-            })),
-            ["D", crate_name, path, docs] => rows.push(IndexRow::Doc(DocRow {
-                crate_name: (*crate_name).to_string(),
-                path: (*path).to_string(),
-                docs: (*docs).to_string(),
-            })),
-            _ => {}
+    values.sort_by(|a, b| (&a.crate_name, &a.path).cmp(&(&b.crate_name, &b.path)));
+    for pair in values.windows(2) {
+        if pair[0].crate_name == pair[1].crate_name
+            && pair[0].path == pair[1].path
+            && (pair[0].old != pair[1].old
+                || pair[0].new != pair[1].new
+                || pair[0].ty != pair[1].ty)
+        {
+            return Err(format!("ambiguous value comparison for {}", pair[0].path));
         }
     }
-    rows
-}
-
-fn tsv_escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('\t', "\\t")
-        .replace('\r', "\\r")
-        .replace('\n', "\\n")
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let bits = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        output.push(TABLE[((bits >> 18) & 63) as usize] as char);
-        output.push(TABLE[((bits >> 12) & 63) as usize] as char);
-        output.push(if chunk.len() > 1 {
-            TABLE[((bits >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        output.push(if chunk.len() > 2 {
-            TABLE[(bits & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    output
+    values.dedup_by(|a, b| a.crate_name == b.crate_name && a.path == b.path);
+    docs.sort_by(|a, b| (&a.crate_name, &a.path).cmp(&(&b.crate_name, &b.path)));
+    docs.dedup_by(|a, b| a.crate_name == b.crate_name && a.path == b.path);
+    Ok((values, docs))
 }
 
 #[cfg(test)]

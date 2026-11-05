@@ -1,6 +1,5 @@
 //! Git subprocess operations.
 
-use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -110,11 +109,34 @@ pub fn worktree_snapshot_commit(run_tmp: &Path) -> Result<String, String> {
     let head_sha = git(&["rev-parse", "--verify", "HEAD"])
         .map_err(|_| "cannot resolve HEAD (no commits yet?)".to_string())?;
 
-    if !git_with_index(&tmp_index, &["read-tree", &head_sha], true).0 {
-        return Err("git read-tree HEAD failed".to_string());
+    let index = git(&["rev-parse", "--git-path", "index"])?;
+    match fs::copy(index, &tmp_index) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !git_with_index(&tmp_index, &["read-tree", &head_sha], true).0 {
+                return Err("git read-tree HEAD failed".to_string());
+            }
+        }
+        Err(error) => return Err(format!("failed to copy working-tree index: {error}")),
     }
     if !git_with_index(&tmp_index, &["add", "-A"], true).0 {
         return Err("git add -A failed (working tree snapshot)".to_string());
+    }
+    // Preserve unmaterialized sparse paths, but do not trust manual skip-worktree flags.
+    let sparse = git(&[
+        "config",
+        "--bool",
+        "--default",
+        "false",
+        "core.sparseCheckout",
+    ])? == "true";
+    let refresh: &[&str] = if sparse {
+        &["add", "--renormalize", "-A"]
+    } else {
+        &["add", "--sparse", "--renormalize", "-A"]
+    };
+    if !git_with_index(&tmp_index, refresh, true).0 {
+        return Err("git add --renormalize failed (working tree snapshot)".to_string());
     }
 
     let (ok, tree) = git_with_index(&tmp_index, &["write-tree"], false);
@@ -132,6 +154,10 @@ pub fn worktree_snapshot_commit(run_tmp: &Path) -> Result<String, String> {
             "-m",
             "[zc worktree snapshot]",
         ])
+        .env("GIT_AUTHOR_NAME", "zc")
+        .env("GIT_AUTHOR_EMAIL", "zc@example.invalid")
+        .env("GIT_COMMITTER_NAME", "zc")
+        .env("GIT_COMMITTER_EMAIL", "zc@example.invalid")
         .stderr(Stdio::null())
         .output()
         .map_err(|_| "git commit-tree failed".to_string())?;
@@ -173,71 +199,6 @@ pub fn worktree_remove(dir: &Path) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-}
-
-/// Prunes stale worktree registrations.
-pub fn worktree_prune() {
-    let _ = Command::new("git")
-        .args(["worktree", "prune"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-/// Reads one file from a Git tree.
-pub fn show_file(rev: &str, path: &str) -> Option<String> {
-    let spec = format!("{rev}:{path}");
-    let output = Command::new("git").args(["show", &spec]).output().ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Maps source-level public type names to their declaration keywords.
-pub fn type_kinds(head_sha: &str) -> HashMap<String, String> {
-    let output = match Command::new("git")
-        .args([
-            "grep",
-            "-E",
-            "^[[:space:]]*pub (struct|enum|trait|union) ",
-            head_sha,
-            "--",
-            "*.rs",
-        ])
-        .stderr(Stdio::null())
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
-        _ => return HashMap::new(),
-    };
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut pairs: Vec<(String, String)> = text.lines().filter_map(parse_type_kind_line).collect();
-    pairs.sort_unstable();
-    pairs.dedup();
-
-    let mut kinds = HashMap::new();
-    for (name, kind) in pairs {
-        kinds.insert(name, kind);
-    }
-    kinds
-}
-
-fn parse_type_kind_line(line: &str) -> Option<(String, String)> {
-    let mut words = line.split_whitespace();
-    while let Some(word) = words.next() {
-        if matches!(word, "struct" | "enum" | "trait" | "union") {
-            let raw_name = words.next()?;
-            let end = raw_name
-                .find(['<', '(', '{', ':', ';'])
-                .unwrap_or(raw_name.len());
-            let name = &raw_name[..end];
-            return (!name.is_empty()).then(|| (name.to_string(), word.to_string()));
-        }
-    }
-    None
 }
 
 fn git_with_index(index: &Path, args: &[&str], discard_stderr: bool) -> (bool, String) {
@@ -283,7 +244,3 @@ impl Drop for RemoveFile {
         let _ = fs::remove_file(&self.0);
     }
 }
-
-#[cfg(test)]
-#[path = "git/tests.rs"]
-mod tests;

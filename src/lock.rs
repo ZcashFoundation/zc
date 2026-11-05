@@ -1,42 +1,61 @@
 //! Resolved dependency changes from Cargo.lock.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use crate::ctx::Ctx;
-use crate::git;
 use crate::model::LockDiff;
 
 /// Compare the lock files at both refs, suppressing direct dependencies.
-pub fn diff(ctx: &Ctx, direct_names: &HashSet<String>) -> Option<LockDiff> {
-    let base = git::show_file(&ctx.refs.baseline, "Cargo.lock");
-    let head = git::show_file(&ctx.refs.head_ref, "Cargo.lock");
-    let (Some(base), Some(head)) = (base, head) else {
-        warn_missing(ctx);
-        return None;
-    };
-
-    let base = extract_lock(&base);
-    let head = extract_lock(&head);
-    if base.is_empty() || head.is_empty() {
-        warn_missing(ctx);
-        return None;
-    }
-
-    let tree = Command::new("cargo")
-        .args(["tree", "--prefix=depth", "--edges=normal", "--workspace"])
-        .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-        .unwrap_or_default();
-
-    Some(build_diff(&base, &head, direct_names, &tree))
+pub fn diff(ctx: &Ctx, direct_names: &HashSet<String>) -> Result<LockDiff, String> {
+    diff_worktrees(&ctx.baseline_worktree, &ctx.head_worktree, direct_names)
 }
 
-fn warn_missing(ctx: &Ctx) {
-    eprintln!(
-        "{}warning:{} Cargo.lock missing at one or both refs; skipping lock diff",
-        ctx.style.yellow, ctx.style.reset
-    );
+fn diff_worktrees(
+    baseline: &Path,
+    head: &Path,
+    direct_names: &HashSet<String>,
+) -> Result<LockDiff, String> {
+    let read_lock = |dir: &Path| {
+        let path = dir.join("Cargo.lock");
+        let contents = fs::read_to_string(&path)
+            .map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+        let packages = extract_lock(&contents);
+        if packages.is_empty() {
+            return Err(format!("no packages found in {}", path.display()));
+        }
+        Ok(packages)
+    };
+    let base = read_lock(baseline)?;
+    let head_lock = read_lock(head)?;
+
+    let output = Command::new("cargo")
+        .current_dir(head)
+        .args([
+            "tree",
+            "--locked",
+            "--prefix=depth",
+            "--edges=normal",
+            "--workspace",
+            "--no-dedupe",
+        ])
+        .output()
+        .map_err(|err| format!("failed to run cargo tree: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo tree failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let tree = String::from_utf8(output.stdout)
+        .map_err(|err| format!("invalid cargo tree output: {err}"))?;
+    if !tree.lines().any(|line| tree_entry(line).is_some()) {
+        return Err("cargo tree returned no packages".to_string());
+    }
+
+    Ok(build_diff(&base, &head_lock, direct_names, &tree))
 }
 
 fn extract_lock(contents: &str) -> Vec<(String, String)> {
@@ -144,21 +163,23 @@ fn versions_by_name(packages: &[(String, String)]) -> BTreeMap<String, String> {
 
 fn attribution(tree: &str, direct_names: &HashSet<String>) -> HashMap<String, String> {
     let mut sources: HashMap<String, Vec<String>> = HashMap::new();
-    let mut anchor: Option<&str> = None;
+    let mut ancestors: Vec<(usize, &str)> = Vec::new();
 
     for line in tree.lines() {
         let Some((depth, name)) = tree_entry(line) else {
             continue;
         };
+        while ancestors.last().is_some_and(|(level, _)| *level >= depth) {
+            ancestors.pop();
+        }
         if depth == 0 {
-            anchor = None;
             continue;
         }
         if direct_names.contains(name) {
-            anchor = Some(name);
+            ancestors.push((depth, name));
             continue;
         }
-        let Some(direct) = anchor else {
+        let Some(&(_, direct)) = ancestors.last() else {
             continue;
         };
         let entry = sources.entry(name.to_string()).or_default();

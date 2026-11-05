@@ -12,8 +12,15 @@ provide.
 
 Before v1.0.0, only the latest release receives security fixes. Pin the action
 to the full commit SHA of a release tag and let Dependabot propose updates.
-Release tags are created by the process in [docs/RELEASING.md](docs/RELEASING.md)
-and are protected from being moved or deleted.
+The intended release process is in [docs/RELEASING.md](docs/RELEASING.md).
+The `v*` tag ruleset restricts updates and deletion, with an administrator bypass;
+it does not authorize tag creation or guarantee that a tag names a reviewed
+commit on `main`. The `main` review and CI rules also allow administrator bypass.
+The release workflow validates its own inputs and target, but other permitted
+tag creators are not constrained by those checks. Enforcing release-only
+creation requires the dedicated release identity and creation policy described
+in the runbook; that prerequisite is not currently provided by the workflow's
+shared `GITHUB_TOKEN`.
 
 ## What zc runs
 

@@ -1,67 +1,70 @@
+use semver::{Op, VersionReq};
+
 use crate::model::Bump;
 
-/// Normalizes a Cargo version requirement for comparison.
-pub fn req_norm(req: &str) -> String {
-    let mut normalized: String = req.chars().filter(|c| !c.is_whitespace()).collect();
-    if let Some(rest) = normalized.strip_prefix('^') {
-        normalized = rest.to_string();
-    }
-
-    let bytes = normalized.as_bytes();
-    let metadata = bytes.windows(2).position(|pair| {
-        matches!(pair[0], b'-' | b'+') && (pair[1].is_ascii_alphanumeric() || pair[1] == b'.')
-    });
-    if let Some(index) = metadata {
-        normalized.truncate(index);
-    }
-    normalized
-}
-
-/// Returns the first numeric version literal in a Cargo requirement.
-pub fn req_version(req: &str) -> String {
-    let normalized = req_norm(req);
-    let Some(start) = normalized.find(|c: char| c.is_ascii_digit()) else {
-        return String::new();
-    };
-    let version: String = normalized[start..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.')
-        .collect();
-    version.strip_suffix('.').unwrap_or(&version).to_string()
-}
-
-/// Classifies a requirement change under Cargo's caret compatibility rules.
+/// Classifies simple version changes under Cargo's compatibility rules.
+///
+/// Bounds and compound requirements need review. Ordinary requirements can prove
+/// incompatible compatibility domains even when their operators or precision differ.
 pub fn classify_bump(old: &str, new: &str) -> Bump {
-    let old_version = req_version(old);
-    let new_version = req_version(new);
-    if old_version == new_version && req_norm(old) != req_norm(new) {
+    let (Ok(old), Ok(new)) = (VersionReq::parse(old), VersionReq::parse(new)) else {
+        return Bump::Unknown;
+    };
+    if old == new {
+        return Bump::Patch;
+    }
+    let ([old], [new]) = (old.comparators.as_slice(), new.comparators.as_slice()) else {
+        return Bump::Unknown;
+    };
+    if !matches!(old.op, Op::Caret | Op::Tilde | Op::Exact | Op::Wildcard)
+        || !matches!(new.op, Op::Caret | Op::Tilde | Op::Exact | Op::Wildcard)
+    {
         return Bump::Unknown;
     }
-
-    let old_major = component(&old_version, 0);
-    let new_major = component(&new_version, 0);
-    if old_major != new_major {
-        return Bump::Major;
-    }
-
-    let old_minor = component(&old_version, 1);
-    let new_minor = component(&new_version, 1);
-    if old_minor != new_minor {
-        return if old_major == "0" {
-            Bump::Major
+    if !old.pre.is_empty() || !new.pre.is_empty() {
+        // Graduation of the same version is compatible; other prerelease changes need review.
+        return if old.op == new.op
+            && old.major == new.major
+            && old.minor == new.minor
+            && old.patch == new.patch
+            && !old.pre.is_empty()
+            && new.pre.is_empty()
+        {
+            Bump::Patch
         } else {
-            Bump::Minor
+            Bump::Unknown
         };
     }
-
-    if old_major == "0" && old_minor == "0" && old_version != new_version {
+    if old.major != new.major {
         return Bump::Major;
     }
+    if old.major == 0 {
+        if matches!((old.minor, new.minor), (Some(a), Some(b)) if a != b) {
+            return Bump::Major;
+        }
+        if old.minor == Some(0) && new.minor == Some(0) && old.patch != new.patch {
+            // Caret and exact requirements pin a 0.0 patch; tilde can overlap later patches.
+            return match (old.patch, new.patch) {
+                (Some(a), Some(b))
+                    if (a < b && matches!(old.op, Op::Caret | Op::Exact))
+                        || (b < a && matches!(new.op, Op::Caret | Op::Exact)) =>
+                {
+                    Bump::Major
+                }
+                _ => Bump::Unknown,
+            };
+        }
+    }
+    if old.op != new.op
+        || old.minor.is_some() != new.minor.is_some()
+        || old.patch.is_some() != new.patch.is_some()
+    {
+        return Bump::Unknown;
+    }
+    if old.minor != new.minor {
+        return Bump::Minor;
+    }
     Bump::Patch
-}
-
-fn component(version: &str, index: usize) -> &str {
-    version.split('.').nth(index).unwrap_or(version)
 }
 
 #[cfg(test)]

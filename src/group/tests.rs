@@ -158,3 +158,65 @@ fn groups_public_api_items() {
         );
     }
 }
+
+#[test]
+fn multiple_attributes_and_abi_functions_group_under_their_actual_module() {
+    let signatures = lines(&[
+        "#[link_section = \".custom\"] #[no_mangle] pub static zc_fixture::nested::COUNT: u8",
+        "pub c fn zc_fixture::nested::exported()",
+        "pub macro zc_fixture::nested::one!",
+        "pub proc macro zc_fixture::nested::#[derive(First)]",
+    ]);
+    let grouped = group(
+        &signatures,
+        Section::Added,
+        GroupMode::Mod,
+        "zc_fixture",
+        &HashMap::new(),
+    );
+    assert!(grouped.iter().any(|record| {
+        matches!(record, GroupRecord::ModHeader(module) if module == "zc_fixture::nested")
+    }));
+    assert!(!grouped
+        .iter()
+        .any(|record| matches!(record, GroupRecord::ExtDivider)));
+    let items = grouped
+        .iter()
+        .filter_map(|record| match record {
+            GroupRecord::Item(item) | GroupRecord::DeepItem(item) => Some(item.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for name in ["COUNT", "exported", "one!", "First"] {
+        assert!(items.contains(name), "lost {name}: {items}");
+    }
+    assert!(items.contains("#[link_section = \".custom\"] #[no_mangle]"));
+}
+
+#[test]
+fn identical_short_owner_names_use_independent_semantic_kinds() {
+    let kinds = HashMap::from([
+        ("zc_fixture::left::Same".into(), "struct".into()),
+        ("zc_fixture::right::Same".into(), "trait".into()),
+        ("Same".into(), "enum".into()),
+    ]);
+    let grouped = group(
+        &lines(&[
+            "pub fn zc_fixture::left::Same::item(&self)",
+            "pub fn zc_fixture::right::Same::item(&self)",
+        ]),
+        Section::Added,
+        GroupMode::Type,
+        "zc_fixture",
+        &kinds,
+    );
+    assert!(grouped.contains(&GroupRecord::TypeHeader {
+        name: "zc_fixture::left::Same".into(),
+        kind: "struct".into(),
+    }));
+    assert!(grouped.contains(&GroupRecord::TypeHeader {
+        name: "zc_fixture::right::Same".into(),
+        kind: "trait".into(),
+    }));
+}

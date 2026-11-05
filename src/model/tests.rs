@@ -1,6 +1,6 @@
 use super::{
-    CrateResult, CrateStatus, DepDiff, FailOn, Refs, Report, Verdict, EXIT_ANALYSIS, EXIT_BREAKING,
-    EXIT_OK,
+    CrateChange, CrateResult, CrateStatus, DepDiff, FailOn, Refs, Report, Verdict, EXIT_ANALYSIS,
+    EXIT_BREAKING, EXIT_OK,
 };
 
 /// A report with nothing to report; each test sets the fields it is about.
@@ -20,6 +20,8 @@ fn report() -> Report {
         deps: DepDiff::default(),
         crates: Vec::new(),
         crate_count: 1,
+        skipped_crates: Vec::new(),
+        lock: None,
         values: Vec::new(),
         docs: Vec::new(),
         removed_total: 0,
@@ -36,6 +38,9 @@ fn report() -> Report {
 fn failing_crate() -> CrateResult {
     CrateResult {
         name: "failing".to_string(),
+        change: CrateChange::Existing,
+        lib_name: "failing".to_string(),
+        breaking_added: Vec::new(),
         removed: 0,
         changed: 0,
         added: 0,

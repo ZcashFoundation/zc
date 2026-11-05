@@ -23,12 +23,13 @@ mod out_file;
 mod progress;
 mod pubdep;
 mod render;
+mod rustdoc;
 mod style;
 mod traitmap;
 mod values;
 mod version_req;
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -179,13 +180,6 @@ fn changelog_document(ctx: &Ctx, report: &Report) -> Result<String, String> {
             ctx.style.red, ctx.style.reset, ctx.refs.head_sha
         )
     })?;
-    if base.is_empty() || head.is_empty() {
-        return Err(format!(
-            "{}error:{} per-crate dependency dump was empty for one side (baseline={}, \
-             head={}); refusing to emit a degenerate diff",
-            ctx.style.red, ctx.style.reset, ctx.refs.baseline_sha, ctx.refs.head_sha
-        ));
-    }
     Ok(changelog_out::emit(ctx, report, &base, &head))
 }
 
@@ -333,7 +327,7 @@ fn run() -> Result<i32, String> {
     // same feature policy, so they stay in sync.
     let features = CrateFeatures::new(opts.features.clone());
 
-    let cache = cache::Cache::new(
+    let mut cache = cache::Cache::new(
         VERSION,
         &cargo_public_api_version,
         &rustc_version,
@@ -342,7 +336,6 @@ fn run() -> Result<i32, String> {
     .map_err(|e| format!("{}error:{} {e}", style.red, style.reset))?;
     let tmp =
         cache::RunTmp::new().map_err(|e| format!("{}error:{} {e}", style.red, style.reset))?;
-    git::worktree_prune();
     cache.prune_old_api_json();
 
     // A dirty working tree is snapshotted into an unreachable commit, so the API diff can
@@ -392,6 +385,14 @@ fn run() -> Result<i32, String> {
         )
     })?;
 
+    cache.configure_api(&toolchain, &[&baseline_worktree, &head_worktree])?;
+    let baseline_crates = cargo_meta::workspace_crates(&baseline_worktree)?;
+    let head_crates = if refs.baseline_sha == refs.head_sha {
+        baseline_crates.clone()
+    } else {
+        cargo_meta::workspace_crates(&head_worktree)?
+    };
+
     let baseline_target = tmp.dir.join("api-baseline-target");
     let head_target = tmp.dir.join("api-head-target");
     for dir in [&baseline_target, &head_target] {
@@ -416,6 +417,8 @@ fn run() -> Result<i32, String> {
         head_worktree,
         baseline_target,
         head_target,
+        baseline_crates,
+        head_crates,
     };
 
     if !document_mode {
@@ -436,22 +439,32 @@ fn run() -> Result<i32, String> {
         .map_err(|e| format!("{}error:{} {e}", ctx.style.red, ctx.style.reset))?;
     let head_deps = cargo_meta::dump_workspace_deps(&ctx, &ctx.refs.head_ref)
         .map_err(|e| format!("{}error:{} {e}", ctx.style.red, ctx.style.reset))?;
-    let dep_diff = deps::diff(&base_deps, &head_deps);
+    let base_per_crate = cargo_meta::dump_per_crate_deps(&ctx, &ctx.refs.baseline_sha)?;
+    let head_per_crate = cargo_meta::dump_per_crate_deps(&ctx, &ctx.refs.head_sha)?;
+    let dep_diff = deps::diff(&base_deps, &head_deps, &base_per_crate, &head_per_crate);
     if !document_mode {
         render::dep_section(&ctx, &dep_diff);
     }
 
     // ── transitive (Cargo.lock) diff ──────────────────────────────────
-    let all_crates = cargo_meta::workspace_crate_names(&ctx.head_worktree);
-    if all_crates.is_empty() {
-        eprintln!(
-            "{}warning:{} no workspace crates discovered via cargo metadata",
-            ctx.style.yellow, ctx.style.reset
-        );
-    }
-    let crate_count = all_crates.len();
+    let all_crates: BTreeSet<_> = ctx
+        .baseline_crates
+        .keys()
+        .chain(ctx.head_crates.keys())
+        .cloned()
+        .collect();
+    let (api_crates, skipped_crates): (Vec<_>, Vec<_>) = all_crates.into_iter().partition(|name| {
+        [&ctx.baseline_crates, &ctx.head_crates]
+            .iter()
+            .any(|crates| {
+                crates
+                    .get(name)
+                    .is_some_and(|package| package.lib_name.is_some())
+            })
+    });
+    let crate_count = api_crates.len();
 
-    if ctx.opts.with_lock {
+    let lock_diff = if ctx.opts.with_lock {
         // Direct workspace deps (and workspace members) are suppressed: the section above
         // already covers them.
         let mut direct: HashSet<String> = HashSet::new();
@@ -461,28 +474,32 @@ fn run() -> Result<i32, String> {
                 direct.insert(real.trim_end_matches(')').to_string());
             }
         }
-        direct.extend(all_crates.iter().cloned());
-        if let (Some(diff), false) = (lock::diff(&ctx, &direct).as_ref(), document_mode) {
-            render::lock_section(&ctx, diff);
+        direct.extend(
+            ctx.baseline_crates
+                .keys()
+                .chain(ctx.head_crates.keys())
+                .cloned(),
+        );
+        let diff = lock::diff(&ctx, &direct)?;
+        if !document_mode {
+            render::lock_section(&ctx, &diff);
         }
-    }
+        Some(diff)
+    } else {
+        None
+    };
 
     // ── per-crate API diff ────────────────────────────────────────────
-    // Per-crate direct deps at both refs feed the public-dependency semver join. Cached, so
-    // --changelog's later read is a hit; failure degrades to an empty join.
-    let pubdep_tables = pubdep::PubdepTables::build(
-        &cargo_meta::dump_per_crate_deps(&ctx, &ctx.refs.baseline_sha).unwrap_or_default(),
-        &cargo_meta::dump_per_crate_deps(&ctx, &ctx.refs.head_sha).unwrap_or_default(),
-    );
+    let pubdep_tables = pubdep::PubdepTables::build(&base_per_crate, &head_per_crate);
 
     ctx.progress.start();
-    let crates = api::analyze(&ctx, &all_crates, &pubdep_tables);
+    let crates = api::analyze(&ctx, &api_crates, &pubdep_tables);
     ctx.progress.clear();
 
     let removed_total: usize = crates.iter().map(|c| c.removed).sum();
     let changed_total: usize = crates.iter().map(|c| c.changed).sum();
     let added_total: usize = crates.iter().map(|c| c.added).sum();
-    let changed_crate_count = crates.iter().filter(|c| c.total() > 0).count();
+    let changed_crate_count = crates.iter().filter(|c| c.has_changes()).count();
     let error_crate_count = crates
         .iter()
         .filter(|c| c.status == model::CrateStatus::Error)
@@ -493,21 +510,22 @@ fn run() -> Result<i32, String> {
     }
 
     // ── const/static value + doc-comment diff (--with-values) ─────────
-    let (values, docs) = if ctx.opts.with_values {
-        values::diff(&ctx, crate_count)
+    let (values, docs) = if ctx.opts.with_values && error_crate_count == 0 {
+        values::diff(&ctx, crate_count)?
     } else {
         (Vec::new(), Vec::new())
     };
 
-    // A reachable dependency change is only a break when its requirement change is provably
-    // incompatible; an "unknown" one is a review item and never flips the verdict.
+    // Package replacement and incompatible public requirements break downstream identity;
+    // an unknown requirement-only change remains a review item.
     let mut pubdep_break_total = 0;
     let mut pubdep_review_total = 0;
     for c in &crates {
         for f in &c.pubdep {
-            match version_req::classify_bump(&f.old, &f.new) {
-                model::Bump::Major => pubdep_break_total += 1,
-                _ => pubdep_review_total += 1,
+            if f.is_breaking() {
+                pubdep_break_total += 1;
+            } else {
+                pubdep_review_total += 1;
             }
         }
     }
@@ -518,6 +536,8 @@ fn run() -> Result<i32, String> {
         deps: dep_diff,
         crates,
         crate_count,
+        skipped_crates,
+        lock: lock_diff,
         values,
         docs,
         removed_total,
@@ -553,12 +573,9 @@ fn run() -> Result<i32, String> {
     if !document_mode {
         render::summary(&ctx, &report);
     }
-    let nothing_changed = report.removed_total
-        + report.changed_total
-        + report.added_total
-        + report.values.len()
-        + report.docs.len()
-        == 0
+    let nothing_changed = report.changed_crate_count == 0
+        && report.values.is_empty()
+        && report.docs.is_empty()
         && report.error_crate_count == 0
         && report.pubdep_break_total == 0
         && report.pubdep_review_total == 0;
@@ -593,7 +610,7 @@ fn run() -> Result<i32, String> {
             return Ok(finish(&ctx, &report));
         };
         print!("{document}");
-        return Ok(EXIT_OK);
+        return Ok(finish(&ctx, &report));
     }
 
     // ── JSON document ─────────────────────────────────────────────────
@@ -603,12 +620,7 @@ fn run() -> Result<i32, String> {
     }
 
     // ── detailed diffs ────────────────────────────────────────────────
-    let src_kinds = if ctx.opts.group_mode == GroupMode::Flat {
-        Default::default()
-    } else {
-        git::type_kinds(&ctx.refs.head_sha)
-    };
-    render::details(&ctx, &report, &src_kinds);
+    render::details(&ctx, &report)?;
     render::values_section(&ctx, &report);
     render::pubdep_section(&ctx, &report);
 

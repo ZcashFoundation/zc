@@ -178,7 +178,7 @@ pub fn label_rank(label: &str) -> u8 {
 /// (the Cargo rename if any, formatted `foo (pkg: bar)`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepRecord {
-    /// Version requirement from Cargo.toml, leading `^` stripped.
+    /// Sorted distinct requirements joined with ` | ` for display; never semver input.
     pub ver: String,
     pub kind: DepKind,
     /// True when every max-kind usage is optional.
@@ -266,7 +266,7 @@ pub enum Scope {
     Msrv,
 }
 
-/// One (workspace crate, direct runtime/build dependency) pair at a ref.
+/// One workspace crate's direct dependency row, retaining target and kind identity.
 #[derive(Clone, Debug)]
 pub struct PerCrateDep {
     pub crate_name: String,
@@ -276,6 +276,10 @@ pub struct PerCrateDep {
     pub scope: Scope,
     /// Real package name (rustdoc renders foreign paths by this).
     pub pkg: String,
+    pub target: Option<String>,
+    pub kind: DepKind,
+    /// Whether this particular dependency declaration is optional.
+    pub optional: bool,
 }
 
 /// Transitive (Cargo.lock) diff.
@@ -295,6 +299,24 @@ pub struct LockDiff {
 pub enum CrateStatus {
     Ok,
     Error,
+}
+
+/// Whether the library exists at both revisions or only one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CrateChange {
+    Existing,
+    Added,
+    Removed,
+}
+
+impl CrateChange {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Existing => "existing",
+            Self::Added => "added",
+            Self::Removed => "removed",
+        }
+    }
 }
 
 /// Stage at which per-crate analysis failed.
@@ -333,14 +355,28 @@ pub struct ApiError {
 #[derive(Clone, Debug)]
 pub struct PubdepFinding {
     pub dep: String,
+    pub old_package: String,
+    pub new_package: String,
     pub old: String,
     pub new: String,
+    pub target: Option<String>,
+}
+
+impl PubdepFinding {
+    pub fn is_breaking(&self) -> bool {
+        self.old_package != self.new_package
+            || crate::version_req::classify_bump(&self.old, &self.new) == Bump::Major
+    }
 }
 
 /// Everything known about one workspace crate after the API diff.
 #[derive(Clone, Debug)]
 pub struct CrateResult {
     pub name: String,
+    pub change: CrateChange,
+    pub lib_name: String,
+    /// Additions that break consumers of an existing public owner.
+    pub breaking_added: Vec<String>,
     pub removed: usize,
     pub changed: usize,
     pub added: usize,
@@ -355,13 +391,13 @@ pub struct CrateResult {
 }
 
 impl CrateResult {
-    pub fn total(&self) -> usize {
-        self.removed + self.changed + self.added
+    pub fn has_changes(&self) -> bool {
+        self.removed > 0 || self.changed > 0 || self.added > 0 || !self.breaking_added.is_empty()
     }
 
-    /// The crate's lib path prefix, e.g. `zebra-state` -> `zebra_state`.
+    /// The library target's Rust path prefix.
     pub fn prefix(&self) -> String {
-        self.name.replace('-', "_")
+        self.lib_name.clone()
     }
 }
 
@@ -443,6 +479,8 @@ pub struct Report {
     pub deps: DepDiff,
     pub crates: Vec<CrateResult>,
     pub crate_count: usize,
+    pub skipped_crates: Vec<String>,
+    pub lock: Option<LockDiff>,
     pub values: Vec<ValueChange>,
     pub docs: Vec<DocChange>,
     pub removed_total: usize,
@@ -456,7 +494,13 @@ pub struct Report {
 
 impl Report {
     pub fn api_breaking(&self) -> usize {
-        self.removed_total + self.changed_total
+        self.removed_total
+            + self.changed_total
+            + self
+                .crates
+                .iter()
+                .map(|result| result.breaking_added.len())
+                .sum::<usize>()
     }
 
     pub fn any_breaking(&self) -> bool {

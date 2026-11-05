@@ -594,44 +594,6 @@ out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
 assert_contains "$out" "- \`impl T for S\`:" "--changelog: removed impl method grouped under its impl (base map)"
 rm -rf "$repo"
 
-# 6q) An impl with its own generic/lifetime params (`impl<'a> ... for ...`) is
-#     recognized as an impl, not collapsed to a stray `impl` member — qual_path
-#     must drop the impl's leading param list like group_key does.
-repo=$(new_repo 'pub struct Foo;')
-base=$(git -C "$repo" rev-parse HEAD)
-head=$(commit_lib "$repo" $'pub struct Foo;\nimpl<\'a> From<&\'a u8> for Foo { fn from(_: &\'a u8) -> Self { Foo } }' 'add lifetime-param impl')
-out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
-assert_contains "$out" "impl From<&u8> for Foo" "--changelog: impl<'a> recognized; lifetime stripped"
-case "$out" in
-*'::impl`'* | *'- `impl`'*) bad "--changelog: impl<'a> must not collapse to a stray 'impl' member" ;;
-*"'a"*) bad "--changelog: lifetime param should be stripped from the impl header" ;;
-*) ok "--changelog: no stray 'impl' member / no lifetime from impl<'a>" ;;
-esac
-rm -rf "$repo"
-
-# 6u) Generic args keep one module segment (not just the last), and nested
-#     generics are extracted with balanced brackets: a local `sub::Bar` inside a
-#     `core::option::Option<...>` renders as `From<option::Option<sub::Bar>>`.
-repo=$(new_repo 'pub struct Foo;')
-base=$(git -C "$repo" rev-parse HEAD)
-head=$(commit_lib "$repo" $'pub struct Foo;\npub mod sub { pub struct Bar; }\nimpl From<core::option::Option<sub::Bar>> for Foo { fn from(_: core::option::Option<sub::Bar>) -> Self { Foo } }' 'add nested From')
-out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
-assert_contains "$out" "impl From<option::Option<sub::Bar>> for Foo" "--changelog: keep one module segment + nested generics"
-rm -rf "$repo"
-
-# 6r) Boilerplate trait methods implied by the impl (here `from`) are not listed
-#     under the impl header.
-repo=$(new_repo $'pub struct Foo;\npub struct Bar;')
-base=$(git -C "$repo" rev-parse HEAD)
-head=$(commit_lib "$repo" $'pub struct Foo;\npub struct Bar;\nimpl From<Bar> for Foo { fn from(_: Bar) -> Self { Foo } }' 'add From<Bar>')
-out=$(cd "$repo" && "$ZC" --changelog "$base" "$head" 2>/dev/null)
-assert_contains "$out" "impl From<Bar> for Foo" "--changelog: From impl is documented"
-case "$out" in
-*'`from`'*) bad "--changelog: a From impl must not list its boilerplate 'from' method" ;;
-*) ok "--changelog: boilerplate 'from' dropped under the impl header" ;;
-esac
-rm -rf "$repo"
-
 # 6s) The compiler-internal `StructuralPartialEq` marker (emitted by a PartialEq
 #     derive) is dropped, while the real `impl PartialEq` is kept.
 repo=$(new_repo 'pub fn placeholder() {}')
@@ -1239,6 +1201,8 @@ assert_eq "$rc" 64 "--features: an empty exclude list exits 64"
 out=$("$ZC" --features 2>&1)
 rc=$?
 assert_eq "$rc" 64 "--features: a missing value exits 64"
+
+source "$(dirname "${BASH_SOURCE[0]}")/regressions.sh"
 
 echo ""
 echo "passed: $pass  failed: $fail"
