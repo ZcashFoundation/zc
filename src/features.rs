@@ -1,11 +1,11 @@
 //! Which Cargo features zc enables when it documents each crate.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
-use crate::cargo_meta::{self, FeatureTables};
+use crate::cargo_meta::{self, CrateFeatureTable, FeatureTables};
 
 /// The feature policy selected with `--features`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,8 +62,8 @@ impl fmt::Display for FeaturePolicy {
     }
 }
 
-/// Cargo arguments that apply `policy` to a crate whose `[features]` table is `declared`.
-pub fn cargo_args(policy: &FeaturePolicy, declared: &BTreeMap<String, Vec<String>>) -> Vec<String> {
+/// Cargo arguments applying `policy` to a crate's feature graph and optional dependencies.
+pub fn cargo_args(policy: &FeaturePolicy, declared: &CrateFeatureTable) -> Vec<String> {
     match policy {
         FeaturePolicy::All => vec!["--all-features".to_owned()],
         FeaturePolicy::Default => Vec::new(),
@@ -81,11 +81,9 @@ pub fn cargo_args(policy: &FeaturePolicy, declared: &BTreeMap<String, Vec<String
 
 /// Declared features that neither are excluded nor enable an excluded feature of the same
 /// crate, directly or through other features.
-fn kept_features(
-    declared: &BTreeMap<String, Vec<String>>,
-    excluded: &BTreeSet<String>,
-) -> Vec<String> {
+fn kept_features(declared: &CrateFeatureTable, excluded: &BTreeSet<String>) -> Vec<String> {
     declared
+        .features
         .keys()
         .filter(|feature| !enables_excluded(feature, declared, excluded, &mut BTreeSet::new()))
         .cloned()
@@ -94,7 +92,7 @@ fn kept_features(
 
 fn enables_excluded(
     feature: &str,
-    declared: &BTreeMap<String, Vec<String>>,
+    declared: &CrateFeatureTable,
     excluded: &BTreeSet<String>,
     visited: &mut BTreeSet<String>,
 ) -> bool {
@@ -104,16 +102,16 @@ fn enables_excluded(
     if !visited.insert(feature.to_owned()) {
         return false;
     }
-    let Some(entries) = declared.get(feature) else {
+    let Some(entries) = declared.features.get(feature) else {
         return false;
     };
     entries.iter().any(|entry| {
-        // `dep:x` enables only an optional dependency, and `x?/f` leaves `x` itself off.
-        // `x/f` also enables `x`'s implicit feature, and a bare name is another feature.
+        // Dependency features activate a same-name local feature only for optional
+        // dependencies. `dep:x` and weak `x?/f` never activate that feature.
         let enabled = match entry.split_once('/') {
             _ if entry.starts_with("dep:") => None,
-            Some((dep, _)) if dep.ends_with('?') => None,
-            Some((dep, _)) => Some(dep),
+            Some((dep, _)) if declared.optional_dependencies.contains(dep) => Some(dep),
+            Some(_) => None,
             None => Some(entry.as_str()),
         };
         enabled.is_some_and(|name| enables_excluded(name, declared, excluded, visited))
@@ -147,12 +145,14 @@ impl CrateFeatures {
         ref_sha: &str,
     ) -> Result<Vec<String>, String> {
         if !matches!(self.policy, FeaturePolicy::Exclude(_)) {
-            return Ok(cargo_args(&self.policy, &BTreeMap::new()));
+            return Ok(cargo_args(&self.policy, &CrateFeatureTable::default()));
         }
         let mut tables_by_ref = self.lock();
         let tables = Self::tables(&mut tables_by_ref, worktree, ref_sha)?;
-        let declared = tables.get(crate_name).cloned().unwrap_or_default();
-        Ok(cargo_args(&self.policy, &declared))
+        let declared = tables
+            .get(crate_name)
+            .ok_or_else(|| format!("workspace package '{crate_name}' missing at {ref_sha}"))?;
+        Ok(cargo_args(&self.policy, declared))
     }
 
     /// Excluded names that no workspace crate in `worktree` declares, which usually means
@@ -167,7 +167,11 @@ impl CrateFeatures {
         };
         excluded
             .iter()
-            .filter(|name| !tables.values().any(|declared| declared.contains_key(*name)))
+            .filter(|name| {
+                !tables
+                    .values()
+                    .any(|declared| declared.features.contains_key(*name))
+            })
             .cloned()
             .collect()
     }

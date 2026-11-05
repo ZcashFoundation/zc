@@ -10,31 +10,44 @@ a single command tells you whether a branch breaks your published surface.
 
 ## What it reports
 
-1. **Workspace dependency diff** — each dep classified by the strongest kind it
-   is used with (runtime > build > dev); consumer-visible breaking changes
-   (runtime removals, major bumps, lost features) are highlighted.
+1. **Workspace dependency diff** — each dep classified by its strongest use
+   (runtime > build > dev). Requirements are compared per member, target, and kind
+   before aggregation; bounds and ambiguous changes are review items, not invented major bumps.
 2. **Transitive `Cargo.lock` diff** (`--with-lock`) — transitive version changes,
-   each annotated with the direct deps that pull it in.
+   annotated with the direct deps that pull them in and retained in machine reports.
 3. **Per-crate public-API diff** (`cargo public-api`) — removed / changed / added
-   items per workspace crate. Built with `--all-features` by default, so
-   feature-gated public items are never silently missed; `--features` narrows
-   that when a workspace has test-only or fuzz-only features. If a crate cannot be analyzed, zc reports
-   the failing stage, stderr tail, command, and hint instead of returning an empty
-   crate result.
-4. **Const/static value & doc-comment diff** (`--with-values`) — catches changes
-   `cargo public-api` can't see, since it compares signatures only.
-5. **Public-dependency semver breaks** — when a crate re-exposes a foreign type
-   (e.g. `-> Result<(), rocksdb::Error>`) whose crate takes a major bump, the
-   signature text is unchanged, so `cargo public-api` sees no diff. zc joins the
-   crate's external direct-dep major bumps with the foreign roots in its public
-   API to flag the break and attribute it to that crate.
+   items across the union of baseline and head libraries. Added and removed crates
+   are reported explicitly. Binary-only members are listed as skipped; unpublished
+   libraries remain analyzed because path and Git dependencies can consume them.
+   Builds use `--all-features` by default; `--features` narrows that policy.
+   Common breaking additions are detected: exhaustive enum variants, loss of struct or
+   enum-variant construction, and required methods on implementable public traits.
+   Analysis failures retain their stage, command, stderr, and hint.
+4. **Values and documentation** (`--with-values`) — const/static and associated-constant
+   changes, including inherited defaults, plus documentation changes on public items
+   and implicit enum/trait members. Adding the first or removing the last doc comment counts.
+   Conflicting evidence for one public value fails analysis instead of guessing.
+   Surviving implementation aliases are compared beyond the selected display path.
+5. **Public-dependency breaks** — joins changed runtime dependencies with foreign
+   types exposed at both revisions, including re-exports, trait implementations,
+   and custom library names. Public package replacements count as type-identity
+   breaks even when the alias and requirement stay unchanged. Ambiguous crate identities
+   produce an analysis error instead of an unsupported verdict.
+   Unchanged dependencies are checked only when they can affect a changed pair.
 
 It ends with a `BREAKING` / `ERROR` / `OK` verdict. `--json` emits machine-readable output for CI and agents.
 
-`zc` materializes the baseline and head refs in disposable detached worktrees
-under a per-run temp directory. Public API builds use target dirs in that temp
-directory, so the invoking checkout's HEAD, branch, index, working tree, and
-`Cargo.lock` are not checked out over or built in. The worktrees are removed on exit.
+`zc` materializes both refs in disposable detached worktrees and runs Cargo there
+with `--locked`. Each ref uses its own Cargo configuration and target directory;
+per-package JSON is preserved before later builds reuse Cargo output paths.
+The invoking checkout's HEAD, index, source, and `Cargo.lock` remain unchanged.
+Working-tree snapshots retain force-staged ignored files, read physical contents despite
+manual index flags, and preserve unmaterialized sparse paths. No Git commit identity is required.
+Only the comparison's temporary worktrees are removed on exit; unrelated registrations stay intact.
+One effective Cargo build target is supported per run; multi-target arrays fail explicitly.
+
+The verdict is not a proof of compatibility. Behavioral changes, unsupported Rust
+patterns, and targets or features outside the selected build still need review.
 
 ## GitHub Actions
 
@@ -75,18 +88,20 @@ The action installs the `cargo-public-api` and Rust nightly versions tested with
 
 The step sets three outputs: `verdict` (`ok`, `breaking`, or `error`), `report`, the path of the JSON report, and `changelog`, the path of the Keep a Changelog draft. A later step can read `${{ steps.api.outputs.verdict }}` or parse the full document. Neither path output ever names a file that does not exist: `report` is empty when the run failed before writing one, and `changelog` is empty unless `with-changelog` is enabled and the analysis produced a draft. Inside Actions, `zc` also annotates the run and writes a summary of the verdict, totals, and per-crate counts to the job summary.
 
+Each action invocation owns its report and changelog files; later invocations do not replace them.
+
 Pin the action to the full commit SHA of a release tag when the workflow requires an immutable dependency. See [SECURITY.md](SECURITY.md).
 
 ## Cache
 
-zc stores persistent cache files under `target/zc-cache/`, or under
+Persistent caches live under the repository root's `target/zc-cache/`, or under
 `$CARGO_TARGET_DIR/zc-cache/` when `CARGO_TARGET_DIR` is set. The cache includes
-resolved dependency summaries, derived value/doc and trait-map indexes, and
-per-ref per-crate rustdoc JSON for public API analysis.
+dependency summaries, trait attribution, and per-ref per-crate rustdoc JSON.
 
-Rustdoc JSON cache entries, and the value and trait-map indexes built from them,
-are keyed by commit SHA, crate name, `cargo-public-api` version, nightly `rustc`
-version, and the `--features` policy used for the run. Working-tree snapshots are not written to the rustdoc JSON cache.
+Rustdoc JSON is keyed by commit SHA, package name, tool versions, feature policy,
+API-affecting environment flags, external Cargo configuration, and cache schema.
+Checked-in configuration is covered by the ref SHA. Working-tree JSON is reused
+only within the current run, never published to the persistent API cache.
 zc removes `*.api.json` files older than 14 days at startup. Delete
 `target/zc-cache/` with `rm -rf target/zc-cache` to clear all zc cache
 state for a checkout.
@@ -144,18 +159,27 @@ Top-level fields:
 - `verdict`: `ok`, `breaking`, or `error`
 - `totals`: API, dependency, value, doc, public-dep, and error counts
 - `deps`, `values`, `docs`: structured diff details
-- `public_dep_breaks`: `[{crate, dep, old, new, class}]` — crates whose public API
-  re-exposes a changed external dependency. Class `breaking` is a provably
-  semver-incompatible requirement change; `review` is one whose compatibility the
-  requirement text does not settle, such as a narrowed or widened version ceiling.
+- `public_dep_breaks`: `[{crate, dep, old, new, old_package, new_package, target, class}]` —
+  crates whose public API re-exposes a changed external dependency. The `old` and `new`
+  fields retain version requirements; `old_package` and `new_package` identify packages.
+  Class `breaking` means a package replacement or provably semver-incompatible requirement;
+  `review` means the requirement text does not settle compatibility, such as a changed ceiling.
   Only `breaking` entries count toward `totals.public_dep_breaking` and the verdict.
-- `crates`: one entry per workspace crate, sorted by crate name
+- `crates`: sorted library results with `change` (`existing`, `added`, or `removed`),
+  `lib_name`, and `breaking_added` reasons as well as API counts and errors.
+- `skipped_crates`: members with no library target at either revision.
+- `lock`: `null` unless requested; otherwise `removed`/`added` `{name, version}` rows,
+  `changed` `{name, old, new}` rows, and `via` attribution by dependency name.
+- `totals.breaking_added`: breaking additions included in `totals.api_breaking`.
 
 A crate error has this shape:
 
 ```json
 {
   "name": "zebra-state",
+  "change": "existing",
+  "lib_name": "zebra_state",
+  "breaking_added": [],
   "removed": 0,
   "changed": 0,
   "added": 0,
@@ -194,29 +218,22 @@ crate, with `### Added` / `### Changed` / `### Removed` lists.
   bullet: `` - `OutPoint::{NULL, new, read, write}` ``. When that brace
   line would exceed ~100 chars, it breaks onto a `` `Type`: `` header with one
   2-space-indented `` - `member` `` per line.
-- Changed items show the old → new signature, so the entry says *what* changed
-  (e.g. a return type going from `Result<Self, E>` to `Self`) rather than just
-  naming the item.
-- Trait-impl associated items are grouped under an `impl <Trait> for <Self>`
-  header. The trait is recovered from the crate's rustdoc JSON (so even a
-  *changed* associated type like `ValueBalance::Bytes`, whose `impl` line is
-  unchanged and thus absent from the diff, is attributed correctly), and the
-  Self generics are recovered from the signature (kept to one module segment,
-  lifetimes dropped). A trait implemented on several types collapses to one
-  `` `impl Trait` for: `` block; conversely several traits on one type collapse to
-  `` `impl {Clone, Debug, ...} for T` ``. The trait's own method (`from`, `clone`,
-  …) isn't listed — the `impl` line implies it.
+- Changed items retain meaningful attributes and show the old → new signature.
+- Trait-impl members use their rustdoc owner and trait identity. Generic arguments
+  retain qualified paths, including own-crate prefixes, and explicit binders remain intact.
+  Inherent or ambiguous members keep their own item paths.
 - Pure machinery is dropped: proptest `Arbitrary` impls, `lazy_static!` wrappers
   (`Deref`/`LazyStatic`/…), and compiler-internal markers (`StructuralPartialEq`).
 - Dependency changes are folded into each crate's section: an MSRV
   (`rust-version`) bump and internal workspace bumps
   (`` `zebra-chain` dependency bumped to `10.0.0`. ``) and external migrations
-  (`` Migrated to `zcash_primitives 0.27`. ``) under `### Changed`, dropped deps
-  under `### Removed`.
+  (`` Migrated to `zcash_primitives 0.27`. ``) under `### Changed`; new and dropped
+  dependency uses appear under `### Added` and `### Removed`. Target and build-dependency
+  context distinguishes uses of the same package. Dev-only dependencies are omitted from the draft.
+- Added crates receive an initial-release entry; removed crates receive a workspace-removal entry.
 
-It's a *draft* — review and curate before committing. Needs a `nightly`
-toolchain for the trait attribution (without one it falls back to plain
-type grouping).
+It's a *draft* — review and curate before committing. Successful drafting obeys
+`--fail-on` just like other output modes; a usable draft can accompany exit status 1.
 
 `--changelog-file <path>` writes that same document to a file in any mode, so a
 run can keep the human report or the JSON on stdout and still hand the draft to
@@ -270,6 +287,7 @@ Then ask Claude to "produce the changelog for PR #N" (or invoke `/zc N`).
 
 ## Requirements
 
+- [Git 2.34 or newer](https://git-scm.com/docs/git-add/2.34.0)
 - [`cargo-public-api`](https://github.com/cargo-public-api/cargo-public-api)
 - a `nightly` toolchain for rustdoc JSON builds
 
@@ -284,8 +302,9 @@ Then ask Claude to "produce the changelog for PR #N" (or invoke `/zc N`).
 
 `--fail-on` selects which findings reach `1` and `2`; the codes keep their
 meaning. `api-breaking` limits `1` to public API and public-dependency breaks,
-`error` reserves failure for an inconclusive analysis, and `none` always exits
-`0`.
+`error` reserves failure for an inconclusive analysis, and `none` does not fail
+on completed findings. Usage/setup errors and failures before a report is produced
+still exit nonzero.
 
 ## License
 

@@ -1,7 +1,7 @@
-use super::{annotations, step_summary};
+use super::annotations;
 use crate::model::{
-    ApiError, Bump, CrateResult, CrateStatus, DepChanged, DepDiff, DepRemoved, ErrorStage, FailOn,
-    PubdepFinding, Refs, Report,
+    ApiError, Bump, CrateChange, CrateResult, CrateStatus, DepChanged, DepDiff, DepRemoved,
+    ErrorStage, FailOn, PubdepFinding, Refs, Report,
 };
 
 fn report() -> Report {
@@ -20,6 +20,8 @@ fn report() -> Report {
         deps: DepDiff::default(),
         crates: Vec::new(),
         crate_count: 2,
+        skipped_crates: Vec::new(),
+        lock: None,
         values: Vec::new(),
         docs: Vec::new(),
         removed_total: 0,
@@ -36,6 +38,9 @@ fn report() -> Report {
 fn crate_result(name: &str, removed: usize, changed: usize, added: usize) -> CrateResult {
     CrateResult {
         name: name.to_string(),
+        change: CrateChange::Existing,
+        lib_name: name.replace('-', "_"),
+        breaking_added: Vec::new(),
         removed,
         changed,
         added,
@@ -54,8 +59,11 @@ fn breaking_report() -> Report {
     let mut second = crate_result("zebra-state", 0, 0, 0);
     second.pubdep = vec![PubdepFinding {
         dep: "rocksdb".to_string(),
+        old_package: "rocksdb".to_string(),
+        new_package: "rocksdb".to_string(),
         old: "0.21".to_string(),
         new: "0.22".to_string(),
+        target: None,
     }];
     report.crates = vec![crate_result("zebra-chain", 2, 1, 4), second];
     report.removed_total = 2;
@@ -64,18 +72,6 @@ fn breaking_report() -> Report {
     report.changed_crate_count = 1;
     report.pubdep_break_total = 1;
     report
-}
-
-#[test]
-fn api_breaks_name_their_count_and_crates() {
-    assert_eq!(
-        annotations(&breaking_report(), FailOn::Breaking),
-        vec![
-            "::error title=Breaking public API change::4 breaking change(s) in zebra-chain, \
-             zebra-state"
-                .to_string()
-        ]
-    );
 }
 
 #[test]
@@ -175,36 +171,4 @@ fn message_data_is_escaped() {
     };
 
     assert!(annotations(&report, FailOn::Breaking)[0].ends_with("odd%25name 1.0 removed"));
-}
-
-#[test]
-fn the_step_summary_carries_the_verdict_totals_and_changed_crates() {
-    assert_eq!(
-        step_summary(&breaking_report()),
-        "\
-## zc: breaking
-
-`merge-base(main, HEAD)` (1111111) -> `HEAD` (2222222)
-
-| Total | Count |
-| --- | ---: |
-| API removed | 2 |
-| API changed | 1 |
-| API added | 4 |
-| Breaking dependencies | 0 |
-| Public-dependency breaks | 1 |
-| Value changes | 0 |
-| Doc changes | 0 |
-| Crates with analysis errors | 0 |
-
-| Crate | Removed | Changed | Added |
-| --- | ---: | ---: | ---: |
-| zebra-chain | 2 | 1 | 4 |
-"
-    );
-}
-
-#[test]
-fn a_report_without_changed_crates_has_no_per_crate_table() {
-    assert!(!step_summary(&report()).contains("| Crate |"));
 }

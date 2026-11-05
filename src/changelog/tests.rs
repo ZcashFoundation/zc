@@ -2,145 +2,269 @@ use super::render;
 use crate::model::Section;
 use crate::traitmap::TraitMap;
 
-struct Case {
-    name: &'static str,
-    lines: &'static [&'static str],
-    section: Section,
-    traits: &'static [((&'static str, &'static str), &'static str)],
-    expected: &'static [&'static str],
+fn rendered(lines: &[&str], section: Section, traits: &TraitMap) -> String {
+    let lines = lines
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect::<Vec<_>>();
+    render(&lines, section, "fixture", traits).join("\n")
 }
 
 #[test]
-fn renders_changelog_groups() {
-    let cases = [
-        Case {
-            name: "brace-grouped members",
-            lines: &[
-                "pub struct fixture::Widget",
-                "impl fixture::Widget",
-                "pub fn fixture::Widget::new() -> fixture::Widget",
-                "pub fn fixture::Widget::run(&self)",
-            ],
-            section: Section::Added,
-            traits: &[],
-            expected: &["- `Widget::{new, run}`"],
-        },
-        Case {
-            name: "over-wide members",
-            lines: &[
-                "pub struct fixture::Verifier",
-                "impl fixture::Verifier",
-                "pub fn fixture::Verifier::check_cross_address_disabled(&self)",
-                "pub fn fixture::Verifier::enforce_nullifier_uniqueness(&self)",
-                "pub fn fixture::Verifier::validate_ironwood_proof_size(&self)",
-                "pub fn fixture::Verifier::validate_orchard_value_balance(&self)",
-            ],
-            section: Section::Added,
-            traits: &[],
-            expected: &[
-                "- `Verifier`:",
-                "  - `check_cross_address_disabled`",
-                "  - `enforce_nullifier_uniqueness`",
-                "  - `validate_ironwood_proof_size`",
-                "  - `validate_orchard_value_balance`",
-            ],
-        },
-        Case {
-            name: "associated item with Self generics",
-            lines: &["pub type fixture::Foo<u32>::Bytes = [u8; 48]"],
-            section: Section::Added,
-            traits: &[(("Foo", "Bytes"), "IntoDisk")],
-            expected: &["- `impl IntoDisk for Foo<u32>`:", "  - `Bytes`"],
-        },
-        Case {
-            name: "changed signature pair",
-            lines: &[
-                "  - pub fn fixture::f() -> u8",
-                "  + pub fn fixture::f() -> u16",
-            ],
-            section: Section::Changed,
-            traits: &[],
-            expected: &["- `fn f() -> u8`", "  → `fn f() -> u16`"],
-        },
-        Case {
-            name: "marker over several types",
-            lines: &[
-                "impl fixture::Marker for fixture::A",
-                "impl fixture::Marker for fixture::B",
-            ],
-            section: Section::Added,
-            traits: &[],
-            expected: &["- `impl Marker` for:", "  - `A`", "  - `B`"],
-        },
-        Case {
-            name: "impl lifetime stripped",
-            lines: &[
-                "impl<'a> core::convert::From<&'a u8> for fixture::Foo",
-                "pub fn fixture::Foo::from(_: &'a u8) -> fixture::Foo",
-            ],
-            section: Section::Added,
-            traits: &[(("Foo", "from"), "From")],
-            expected: &["- `impl From<&u8> for Foo`"],
-        },
-        Case {
-            name: "nested generic paths shortened",
-            lines: &[
-                "impl core::convert::From<core::option::Option<fixture::sub::Bar>> for fixture::Foo",
-                "pub fn fixture::Foo::from(_: core::option::Option<fixture::sub::Bar>) -> fixture::Foo",
-            ],
-            section: Section::Added,
-            traits: &[(("Foo", "from"), "From")],
-            expected: &["- `impl From<option::Option<sub::Bar>> for Foo`"],
-        },
-        Case {
-            name: "derives collapse by Self type",
-            lines: &[
-                "#[derive(Clone, Debug)] pub struct fixture::Bar",
-                "impl core::clone::Clone for fixture::Bar",
-                "impl core::fmt::Debug for fixture::Bar",
-            ],
-            section: Section::Added,
-            traits: &[],
-            expected: &["- `Bar`", "- `impl {Clone, Debug} for Bar`"],
-        },
-        Case {
-            name: "whole module subsumes contents",
-            lines: &[
-                "pub mod fixture::m",
-                "pub struct fixture::m::Foo",
-                "pub fn fixture::m::g()",
-                "pub fn fixture::sibling() -> u8",
-            ],
-            section: Section::Added,
-            traits: &[],
-            expected: &["- `m`", "- `sibling`"],
-        },
-    ];
+fn ordinary_proptest_names_are_public_apis() {
+    let traits = TraitMap::from([(
+        ("fixture::Generated".into(), "Strategy".into()),
+        Some("proptest::arbitrary::Arbitrary".into()),
+    )]);
+    let added = rendered(
+        &[
+            "pub type fixture::Strategy = u8",
+            "pub type fixture::Parameters = ()",
+            "pub fn fixture::arbitrary()",
+            "pub fn fixture::arbitrary_with(usize)",
+            "pub fn fixture::uses_strategy(proptest::strategy::BoxedStrategy<u8>)",
+            "impl fixture::Arbitrary for fixture::Ordinary",
+            "impl proptest::arbitrary::Arbitrary for fixture::Generated",
+            "pub type fixture::Generated::Strategy = u8",
+        ],
+        Section::Added,
+        &traits,
+    );
+    for name in [
+        "Strategy",
+        "Parameters",
+        "arbitrary",
+        "arbitrary_with",
+        "uses_strategy",
+        "Arbitrary for Ordinary",
+    ] {
+        assert!(added.contains(name), "lost {name}: {added}");
+    }
+    assert!(!added.contains("Generated"));
+    let changed = rendered(
+        &[
+            "  - pub type fixture::Strategy = u8",
+            "  + pub type fixture::Strategy = u16",
+            "  - pub type fixture::Parameters = u8",
+            "  + pub type fixture::Parameters = u16",
+        ],
+        Section::Changed,
+        &traits,
+    );
+    for signature in [
+        "Strategy = u8",
+        "Strategy = u16",
+        "Parameters = u8",
+        "Parameters = u16",
+    ] {
+        assert!(changed.contains(signature), "lost {signature}: {changed}");
+    }
+}
 
-    for case in cases {
-        let lines = case
-            .lines
-            .iter()
-            .map(|line| (*line).to_string())
-            .collect::<Vec<_>>();
-        let mut traits = TraitMap::new();
-        for &((self_name, member), trait_path) in case.traits {
-            traits.insert(
-                (self_name.to_string(), member.to_string()),
-                trait_path.to_string(),
-            );
-        }
-        let expected = case
-            .expected
-            .iter()
-            .map(|line| (*line).to_string())
-            .collect::<Vec<_>>();
+#[test]
+fn trait_arguments_and_full_owner_paths_remain_distinct() {
+    let result = rendered(
+        &[
+            "impl core::convert::From<u8> for fixture::left::S",
+            "pub fn fixture::left::S::from(u8) -> Self",
+            "impl core::convert::From<u16> for fixture::left::S",
+            "pub fn fixture::left::S::from(u16) -> Self",
+            "impl fixture::left::Trait for fixture::right::S",
+            "impl fixture::right::Trait for fixture::right::S",
+        ],
+        Section::Added,
+        &TraitMap::new(),
+    );
+    for identity in [
+        "From<u8>",
+        "From<u16>",
+        "left::S",
+        "right::S",
+        "left::Trait",
+        "right::Trait",
+    ] {
+        assert!(result.contains(identity), "lost {identity}: {result}");
+    }
+}
 
-        assert_eq!(
-            render(&lines, case.section, "fixture", &traits),
-            expected,
-            "{}",
-            case.name
+#[test]
+fn inherent_or_ambiguous_methods_do_not_invent_trait_impls() {
+    let traits = TraitMap::from([
+        (("fixture::S".into(), "default".into()), None),
+        (
+            ("fixture::left::S".into(), "item".into()),
+            Some("fixture::Trait<u8>".into()),
+        ),
+        (("fixture::right::S".into(), "item".into()), None),
+    ]);
+    let result = rendered(
+        &[
+            "impl fixture::S",
+            "pub fn fixture::S::default(usize) -> Self",
+            "pub fn fixture::left::S::item(&self)",
+            "pub fn fixture::right::S::item(&self)",
+        ],
+        Section::Added,
+        &traits,
+    );
+    assert!(result.contains("S::default"));
+    assert!(!result.contains("impl Default"));
+    assert!(result.contains("Trait<u8> for left::S"));
+    assert!(result.contains("right::S::item"));
+    assert!(!result.contains("Trait<u8> for right::S"));
+}
+
+#[test]
+fn changed_signatures_keep_all_semantic_attributes() {
+    let result = rendered(
+        &[
+            "  - #[repr(C)] pub struct fixture::S",
+            "  + #[repr(C)] #[non_exhaustive] pub struct fixture::S",
+            "  - #[no_mangle] pub c fn fixture::exported()",
+            "  + #[link_section = \".custom\"] #[no_mangle] pub c fn fixture::exported()",
+        ],
+        Section::Changed,
+        &TraitMap::new(),
+    );
+    assert!(result.contains("#[repr(C)] struct S"));
+    assert!(result.contains("#[repr(C)] #[non_exhaustive] struct S"));
+    assert!(result.contains("#[link_section = \".custom\"] #[no_mangle] c fn exported()"));
+}
+
+#[test]
+fn pinned_macro_proc_macro_and_abi_declarations_keep_their_names() {
+    let result = rendered(
+        &[
+            "pub macro fixture::one!",
+            "pub macro fixture::two!",
+            "pub proc macro fixture::#[derive(First)]",
+            "pub proc macro fixture::#[derive(Second)]",
+            "pub proc macro fixture::function_like!()",
+            "pub proc macro fixture::#[attribute_like]",
+            "#[link_section = \".custom\"] #[no_mangle] pub static fixture::COUNT: u8",
+            "pub c fn fixture::exported()",
+            "pub unsafe extern \"C-unwind\" fn fixture::unwindable()",
+        ],
+        Section::Added,
+        &TraitMap::new(),
+    );
+    for name in [
+        "one!",
+        "two!",
+        "First",
+        "Second",
+        "function_like!",
+        "attribute_like",
+        "COUNT",
+        "exported",
+        "unwindable",
+    ] {
+        assert!(result.contains(name), "lost {name}: {result}");
+    }
+}
+
+#[test]
+fn concise_member_groups_keep_existing_braces() {
+    let result = rendered(
+        &[
+            "pub struct fixture::Widget",
+            "impl fixture::Widget",
+            "pub fn fixture::Widget::new() -> Self",
+            "pub fn fixture::Widget::run(&self)",
+        ],
+        Section::Added,
+        &TraitMap::new(),
+    );
+    assert_eq!(result, "- `Widget::{new, run}`");
+}
+
+#[test]
+fn generic_trait_impls_keep_lifetimes_and_owner_arguments() {
+    let traits = TraitMap::from([(
+        ("fixture::S<T>".into(), "from".into()),
+        Some("core::convert::From<&'a T>".into()),
+    )]);
+    let header = "impl<'a, T> core::convert::From<&'a T> for fixture::S<T>";
+    let member = "pub fn fixture::S<T>::from(&'a T) -> Self";
+    for lines in [[header, member], [member, header]] {
+        let result = rendered(
+            &[
+                lines[0],
+                lines[1],
+                "impl fixture::Trait<u16> for fixture::S<u16>",
+            ],
+            Section::Added,
+            &traits,
         );
+        assert!(
+            result.contains("impl<'a, T> From<&'a T> for S<T>"),
+            "{result}"
+        );
+        assert!(result.contains("Trait<u16> for S<u16>"));
+    }
+}
+
+#[test]
+fn bounded_impl_headers_and_attributed_members_share_one_group_in_either_order() {
+    let traits = TraitMap::from([(
+        ("fixture::S<T>".into(), "go".into()),
+        Some("fixture::Public".into()),
+    )]);
+    let header = "impl<T> fixture::Public for fixture::S<T> where T: core::marker::Copy";
+    let member = "#[must_use] pub fn fixture::S<T>::go(&self) -> T";
+    for lines in [[header, member], [member, header]] {
+        assert_eq!(
+            rendered(&lines, Section::Added, &traits),
+            "- `impl<T> Public for S<T> where T: core::marker::Copy`:\n  - `go`",
+        );
+    }
+}
+
+#[test]
+fn where_tokens_inside_const_arguments_do_not_split_impl_identity() {
+    let owner = "fixture::S<{ \" where \".len() }>";
+    let traits = TraitMap::from([((owner.into(), "go".into()), Some("fixture::Public".into()))]);
+    let header =
+        "impl fixture::Public for fixture::S<{ \" where \".len() }> where Self: core::marker::Copy";
+    let member = "pub fn fixture::S<{ \" where \".len() }>::go(&self)";
+    for lines in [[header, member], [member, header]] {
+        assert_eq!(
+            rendered(&lines, Section::Added, &traits),
+            "- `impl Public for S<{ \" where \".len() }> where Self: core::marker::Copy`:\n  - `go`",
+        );
+    }
+}
+
+#[test]
+fn generic_method_and_gat_binders_do_not_change_trait_ownership() {
+    let traits = TraitMap::from([
+        (
+            ("fixture::S<T>".into(), "choose".into()),
+            Some("fixture::Trait<T>".into()),
+        ),
+        (
+            ("fixture::S<T>".into(), "Output".into()),
+            Some("fixture::Trait<T>".into()),
+        ),
+    ]);
+    let header = "impl<T> fixture::Trait<T> for fixture::S<T>";
+    let method = "pub fn fixture::S<T>::choose<U: dependency::Bound>(&self, value: U) -> U";
+    let gat = "pub type fixture::S<T>::Output<'a>: dependency::Bound";
+    for lines in [[header, method, gat], [gat, method, header]] {
+        let result = rendered(&lines, Section::Added, &traits);
+        assert_eq!(result.matches("- `impl").count(), 1);
+        assert!(result.starts_with("- `impl<T> Trait<T> for S<T>`:"));
+        assert!(result.contains("`choose<U: dependency::Bound>`"));
+        assert!(result.contains("`Output<'a>`"));
+    }
+    assert_eq!(
+        rendered(&[method], Section::Added, &traits),
+        "- `impl Trait<T> for S<T>`:\n  - `choose<U: dependency::Bound>`",
+    );
+    let ambiguous = TraitMap::from([(("fixture::S<T>".into(), "choose".into()), None)]);
+    for map in [&ambiguous, &TraitMap::new()] {
+        let result = rendered(&[method], Section::Added, map);
+        assert!(!result.contains("impl"));
+        assert!(result.contains("choose<U: dependency::Bound>"));
     }
 }

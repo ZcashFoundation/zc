@@ -129,15 +129,14 @@ runs:
             ;;
         esac
 
-        report=$RUNNER_TEMP/zc-report.json
-        rm -f "$report"
+        output_dir=$(mktemp -d "$RUNNER_TEMP/zc-output.XXXXXXXXXX")
+        report=$output_dir/report.json
         arguments+=(--report "$report")
 
         changelog=""
         case "$INPUT_WITH_CHANGELOG" in
           true)
-            changelog=$RUNNER_TEMP/zc-changelog.md
-            rm -f "$changelog"
+            changelog=$output_dir/changelog.md
             arguments+=(--changelog-file "$changelog")
             ;;
           false) ;;
@@ -147,7 +146,7 @@ runs:
             ;;
         esac
 
-        arguments+=("$INPUT_BASELINE")
+        arguments+=(-- "$INPUT_BASELINE")
         if [[ -n "$INPUT_HEAD" ]]; then
           arguments+=("$INPUT_HEAD")
         fi

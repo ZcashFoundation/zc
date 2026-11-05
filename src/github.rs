@@ -79,12 +79,23 @@ pub fn step_summary(report: &Report) -> String {
     if report.features != FeaturePolicy::All {
         let _ = writeln!(out, "Features: `{}`\n", report.features);
     }
+    if !report.skipped_crates.is_empty() {
+        let _ = writeln!(
+            out,
+            "Skipped (no library target): {}\n",
+            report.skipped_crates.join(", ")
+        );
+    }
 
     out.push_str("| Total | Count |\n| --- | ---: |\n");
     for (label, count) in [
         ("API removed", report.removed_total),
         ("API changed", report.changed_total),
         ("API added", report.added_total),
+        (
+            "Breaking additions",
+            report.api_breaking() - report.removed_total - report.changed_total,
+        ),
         ("Breaking dependencies", report.deps.breaking),
         ("Public-dependency breaks", report.pubdep_break_total),
         ("Value changes", report.values.len()),
@@ -95,12 +106,16 @@ pub fn step_summary(report: &Report) -> String {
     }
 
     if report.changed_crate_count > 0 {
-        out.push_str("\n| Crate | Removed | Changed | Added |\n| --- | ---: | ---: | ---: |\n");
-        for result in report.crates.iter().filter(|result| result.total() > 0) {
+        out.push_str("\n| Crate | Removed | Changed | Added | Breaking additions |\n| --- | ---: | ---: | ---: | ---: |\n");
+        for result in report.crates.iter().filter(|result| result.has_changes()) {
             let _ = writeln!(
                 out,
-                "| {} | {} | {} | {} |",
-                result.name, result.removed, result.changed, result.added
+                "| {} | {} | {} | {} | {} |",
+                result.name,
+                result.removed,
+                result.changed,
+                result.added,
+                result.breaking_added.len()
             );
         }
     }
@@ -113,7 +128,11 @@ fn broken_crates(report: &Report) -> Vec<String> {
     report
         .crates
         .iter()
-        .filter(|result| result.removed + result.changed > 0 || !result.pubdep.is_empty())
+        .filter(|result| {
+            result.removed + result.changed > 0
+                || !result.breaking_added.is_empty()
+                || result.pubdep.iter().any(|finding| finding.is_breaking())
+        })
         .map(|result| result.name.clone())
         .collect()
 }

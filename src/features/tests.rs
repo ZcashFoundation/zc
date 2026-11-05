@@ -1,17 +1,21 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::{cargo_args, FeaturePolicy};
+use super::{cargo_args, CrateFeatures, FeaturePolicy};
+use crate::cargo_meta::CrateFeatureTable;
 
-fn table(features: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
-    features
-        .iter()
-        .map(|(name, entries)| {
-            (
-                (*name).to_owned(),
-                entries.iter().map(|entry| (*entry).to_owned()).collect(),
-            )
-        })
-        .collect()
+fn table(features: &[(&str, &[&str])]) -> CrateFeatureTable {
+    CrateFeatureTable {
+        features: features
+            .iter()
+            .map(|(name, entries)| {
+                (
+                    (*name).to_owned(),
+                    entries.iter().map(|entry| (*entry).to_owned()).collect(),
+                )
+            })
+            .collect(),
+        optional_dependencies: BTreeSet::new(),
+    }
 }
 
 fn exclude(names: &str) -> FeaturePolicy {
@@ -84,11 +88,12 @@ fn exclude_drops_features_that_enable_an_excluded_one() {
 
 #[test]
 fn exclude_follows_the_implicit_feature_a_dependency_feature_enables() {
-    let declared = table(&[
+    let mut declared = table(&[
         ("tools", &["helper/std"]),
         ("helper", &["fuzzing"]),
         ("fuzzing", &[]),
     ]);
+    declared.optional_dependencies.insert("helper".to_owned());
     assert_eq!(
         cargo_args(&exclude("fuzzing"), &declared),
         ["--no-default-features"]
@@ -101,5 +106,75 @@ fn exclude_survives_feature_cycles() {
     assert_eq!(
         cargo_args(&exclude("fuzzing"), &declared),
         ["--no-default-features", "--features", "a,b"]
+    );
+}
+
+#[test]
+fn required_dependency_feature_does_not_enable_same_name_local_feature() {
+    let declared = table(&[
+        ("tools", &["helper/std"]),
+        ("helper", &["fuzzing"]),
+        ("fuzzing", &[]),
+    ]);
+    assert_eq!(
+        cargo_args(&exclude("fuzzing"), &declared),
+        ["--no-default-features", "--features", "tools"]
+    );
+}
+
+#[test]
+fn weak_and_explicit_dependency_edges_do_not_enable_local_features() {
+    let mut declared = table(&[
+        ("weak", &["helper?/std"]),
+        ("explicit", &["dep:helper"]),
+        ("strong", &["helper/std"]),
+        ("helper", &["fuzzing"]),
+        ("fuzzing", &[]),
+    ]);
+    declared.optional_dependencies.insert("helper".to_owned());
+    assert_eq!(
+        cargo_args(&exclude("helper,fuzzing"), &declared),
+        ["--no-default-features", "--features", "explicit,weak"]
+    );
+}
+
+#[test]
+fn cycles_reaching_excluded_features_are_removed_from_every_start() {
+    let declared = table(&[
+        ("a", &["b"]),
+        ("b", &["a", "c"]),
+        ("c", &["fuzzing"]),
+        ("fuzzing", &[]),
+        ("kept", &["other"]),
+        ("other", &["kept"]),
+    ]);
+    assert_eq!(
+        cargo_args(&exclude("fuzzing"), &declared),
+        ["--no-default-features", "--features", "kept,other"]
+    );
+}
+
+#[test]
+fn feature_arguments_use_the_corresponding_ref_cache() {
+    let features = CrateFeatures::new(exclude("fuzzing"));
+    {
+        let mut cache = features.lock();
+        cache.insert(
+            "base".to_owned(),
+            BTreeMap::from([("pkg".to_owned(), table(&[("old", &[]), ("fuzzing", &[])]))]),
+        );
+        cache.insert(
+            "head".to_owned(),
+            BTreeMap::from([("pkg".to_owned(), table(&[("new", &[]), ("fuzzing", &[])]))]),
+        );
+    }
+    let absent = std::path::Path::new("/not-a-worktree");
+    assert_eq!(
+        features.cargo_args("pkg", absent, "base").unwrap(),
+        ["--no-default-features", "--features", "old"]
+    );
+    assert_eq!(
+        features.cargo_args("pkg", absent, "head").unwrap(),
+        ["--no-default-features", "--features", "new"]
     );
 }

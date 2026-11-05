@@ -53,9 +53,9 @@ jobs:
       - name: unit tests
         run: cargo test --locked --all-features
       - name: shellcheck
-        run: shellcheck -S warning tests/run.sh
+        run: shellcheck -S warning tests/run.sh tests/regressions.sh
       - name: bash syntax
-        run: bash -n tests/run.sh
+        run: bash -n tests/run.sh && bash -n tests/regressions.sh
 
   msrv:
     name: MSRV build

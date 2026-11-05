@@ -4,29 +4,51 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::changelog;
 use crate::ctx::Ctx;
-use crate::model::{Bump, PerCrateDep, Report, Scope, Section};
+use crate::model::{CrateChange, CrateResult, DepKind, PerCrateDep, Report, Scope, Section};
 use crate::traitmap::{self, TraitMap};
-use crate::version_req;
 
 #[derive(Default, Debug, PartialEq, Eq)]
 struct DependencyMarkdown {
+    added: BTreeMap<String, Vec<String>>,
     changed: BTreeMap<String, Vec<String>>,
     removed: BTreeMap<String, Vec<String>>,
 }
 
+fn dependency_key(row: &PerCrateDep) -> (&str, &str, Option<&str>, &str) {
+    (
+        &row.crate_name,
+        &row.dep,
+        row.target.as_deref(),
+        row.kind.as_str(),
+    )
+}
+
+fn dependency_context(target: Option<&str>, kind: DepKind) -> String {
+    let mut context = String::new();
+    if let Some(target) = target {
+        context.push_str(&format!(" on `{target}`"));
+    }
+    if kind == DepKind::Build {
+        context.push_str(" (build dependency)");
+    }
+    context
+}
+
 fn dependency_markdown(base: &[PerCrateDep], head: &[PerCrateDep]) -> DependencyMarkdown {
-    let base_by_key: HashMap<(&str, &str), &PerCrateDep> = base
-        .iter()
-        .map(|row| ((row.crate_name.as_str(), row.dep.as_str()), row))
-        .collect();
-    let head_keys: HashSet<(&str, &str)> = head
-        .iter()
-        .map(|row| (row.crate_name.as_str(), row.dep.as_str()))
-        .collect();
+    let base_by_key: HashMap<_, _> = base.iter().map(|row| (dependency_key(row), row)).collect();
+    let head_keys: HashSet<_> = head.iter().map(dependency_key).collect();
     let mut markdown = DependencyMarkdown::default();
 
-    for row in head {
-        let Some(old) = base_by_key.get(&(row.crate_name.as_str(), row.dep.as_str())) else {
+    for row in head.iter().filter(|row| row.kind != DepKind::Dev) {
+        let context = dependency_context(row.target.as_deref(), row.kind);
+        let Some(old) = base_by_key.get(&dependency_key(row)) else {
+            if row.scope != Scope::Msrv {
+                markdown
+                    .added
+                    .entry(row.crate_name.clone())
+                    .or_default()
+                    .push(format!("- `{}` dependency{context}.", row.dep));
+            }
             continue;
         };
         if old.req == row.req {
@@ -36,10 +58,10 @@ fn dependency_markdown(base: &[PerCrateDep], head: &[PerCrateDep]) -> Dependency
             Scope::Msrv if row.req != "-" => Some(format!("- MSRV is now {}.", row.req)),
             Scope::Msrv => None,
             Scope::Internal => Some(format!(
-                "- `{}` dependency bumped to `{}`.",
+                "- `{}` dependency bumped to `{}`{context}.",
                 row.dep, row.req
             )),
-            Scope::External => Some(format!("- Migrated to `{} {}`.", row.dep, row.req)),
+            Scope::External => Some(format!("- Migrated to `{} {}`{context}.", row.dep, row.req)),
         };
         if let Some(line) = line {
             let lines = markdown.changed.entry(row.crate_name.clone()).or_default();
@@ -51,13 +73,17 @@ fn dependency_markdown(base: &[PerCrateDep], head: &[PerCrateDep]) -> Dependency
         }
     }
 
-    for row in base {
-        if row.dep != "~msrv" && !head_keys.contains(&(row.crate_name.as_str(), row.dep.as_str())) {
+    for row in base.iter().filter(|row| row.kind != DepKind::Dev) {
+        if row.dep != "~msrv" && !head_keys.contains(&dependency_key(row)) {
             markdown
                 .removed
                 .entry(row.crate_name.clone())
                 .or_default()
-                .push(format!("- `{}` dependency.", row.dep));
+                .push(format!(
+                    "- `{}` dependency{}.",
+                    row.dep,
+                    dependency_context(row.target.as_deref(), row.kind)
+                ));
         }
     }
     markdown
@@ -70,7 +96,13 @@ fn fold_public_dependency_notes(
     let mut extra = BTreeMap::<String, Vec<String>>::new();
     for result in &report.crates {
         for finding in &result.pubdep {
-            let note = if version_req::classify_bump(&finding.old, &finding.new) == Bump::Major {
+            let note = if finding.old_package != finding.new_package {
+                format!(
+                    "package `{}` was replaced by `{}`, changing the identity of types \
+                     in this crate's public API; downstream users must migrate in lockstep.",
+                    finding.old_package, finding.new_package
+                )
+            } else if finding.is_breaking() {
                 format!(
                     "its types appear in this crate's public API, so downstream users must \
                      upgrade `{}` in lockstep.",
@@ -81,8 +113,12 @@ fn fold_public_dependency_notes(
                  are affected."
                     .to_string()
             };
-            let migrated = format!("- Migrated to `{} {}`.", finding.dep, finding.new);
-            let replacement = format!("- Migrated to `{} {}`; {note}", finding.dep, finding.new);
+            let context = dependency_context(finding.target.as_deref(), DepKind::Runtime);
+            let migrated = format!("- Migrated to `{} {}`{context}.", finding.dep, finding.new);
+            let replacement = format!(
+                "- Migrated to `{} {}`{context}; {note}",
+                finding.dep, finding.new
+            );
             let mut folded = false;
             if let Some(lines) = dependency.changed.get_mut(&result.name) {
                 if let Some(line) = lines.iter_mut().find(|line| line.contains(&migrated)) {
@@ -92,7 +128,7 @@ fn fold_public_dependency_notes(
             }
             if !folded {
                 extra.entry(result.name.clone()).or_default().push(format!(
-                    "- Public dependency `{}` changed to `{}`; {note}",
+                    "- Public dependency `{}` changed to `{}`{context}; {note}",
                     finding.dep, finding.new
                 ));
             }
@@ -117,6 +153,28 @@ fn append_section(out: &mut String, heading: &str, parts: &[&[String]]) {
     out.push('\n');
 }
 
+fn semantic_changes(result: &CrateResult, prefix: &str) -> Vec<String> {
+    if result.breaking_added.is_empty() {
+        return Vec::new();
+    }
+    // ponytail: notes may overlap raw additions; consolidate them when curating the draft.
+    let prefix = format!("{prefix}::");
+    result
+        .breaking_added
+        .iter()
+        .map(|reason| {
+            if let Some((path, detail)) = reason.split_once(": ") {
+                format!(
+                    "- Public API `{}`: {detail}.",
+                    path.strip_prefix(&prefix).unwrap_or(path)
+                )
+            } else {
+                format!("- {reason}")
+            }
+        })
+        .collect()
+}
+
 pub fn emit(ctx: &Ctx, report: &Report, base: &[PerCrateDep], head: &[PerCrateDep]) -> String {
     let mut dependency = dependency_markdown(base, head);
     let public_dependency = fold_public_dependency_notes(report, &mut dependency);
@@ -124,13 +182,16 @@ pub fn emit(ctx: &Ctx, report: &Report, base: &[PerCrateDep], head: &[PerCrateDe
     let changed_crates: Vec<String> = report
         .crates
         .iter()
-        .filter(|result| result.total() > 0)
+        .filter(|result| {
+            result.change == CrateChange::Existing
+                && result.removed + result.changed + result.added > 0
+        })
         .map(|result| result.name.clone())
         .collect();
     let removed_crates: Vec<String> = report
         .crates
         .iter()
-        .filter(|result| result.removed > 0)
+        .filter(|result| result.change == CrateChange::Existing && result.removed > 0)
         .map(|result| result.name.clone())
         .collect();
 
@@ -151,6 +212,15 @@ pub fn emit(ctx: &Ctx, report: &Report, base: &[PerCrateDep], head: &[PerCrateDe
     let empty_traits = TraitMap::new();
     let mut out = String::new();
     for result in &report.crates {
+        if result.change != CrateChange::Existing {
+            out.push_str(&format!("## {}\n\n", result.name));
+            if result.change == CrateChange::Added {
+                out.push_str("### Added\n- Initial release!\n\n");
+            } else {
+                out.push_str("### Removed\n- Crate removed from the workspace.\n\n");
+            }
+            continue;
+        }
         let prefix = result.prefix();
         let head_map = head_traits.get(&result.name).unwrap_or(&empty_traits);
         let base_map = base_traits.get(&result.name).unwrap_or(&empty_traits);
@@ -164,11 +234,17 @@ pub fn emit(ctx: &Ctx, report: &Report, base: &[PerCrateDep], head: &[PerCrateDe
         } else {
             Vec::new()
         };
+        let semantic_api = semantic_changes(result, &prefix);
         let removed_api = if result.removed > 0 {
             changelog::render(&result.removed_lines, Section::Removed, &prefix, base_map)
         } else {
             Vec::new()
         };
+        let dep_added = dependency
+            .added
+            .get(&result.name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let dep_changed = dependency
             .changed
             .get(&result.name)
@@ -183,18 +259,25 @@ pub fn emit(ctx: &Ctx, report: &Report, base: &[PerCrateDep], head: &[PerCrateDe
             .get(&result.name)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let has_changed = !dep_changed.is_empty() || !pubdep.is_empty() || !changed_api.is_empty();
+        let has_changed = !dep_changed.is_empty()
+            || !pubdep.is_empty()
+            || !changed_api.is_empty()
+            || !semantic_api.is_empty();
         let has_removed = !removed_api.is_empty() || !dep_removed.is_empty();
-        if added.is_empty() && !has_changed && !has_removed {
+        if added.is_empty() && dep_added.is_empty() && !has_changed && !has_removed {
             continue;
         }
 
         out.push_str("## ");
         out.push_str(&result.name);
         out.push_str("\n\n");
-        append_section(&mut out, "Added", &[&added]);
+        append_section(&mut out, "Added", &[&added, dep_added]);
         if has_changed {
-            append_section(&mut out, "Changed", &[dep_changed, pubdep, &changed_api]);
+            append_section(
+                &mut out,
+                "Changed",
+                &[dep_changed, pubdep, &changed_api, &semantic_api],
+            );
         }
         if has_removed {
             append_section(&mut out, "Removed", &[&removed_api, dep_removed]);

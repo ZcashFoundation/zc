@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{
-    kind_label, label_rank, Bump, DepAdded, DepChanged, DepDiff, DepRecord, DepRemoved,
+    kind_label, label_rank, Bump, DepAdded, DepChanged, DepDiff, DepKind, DepRecord, DepRemoved,
+    PerCrateDep, Scope,
 };
 use crate::version_req::classify_bump;
 
@@ -38,9 +39,56 @@ pub fn feature_diff(old_def: bool, new_def: bool, old: &[String], new: &[String]
     delta.join(",")
 }
 
-/// Compare workspace dependencies and classify consumer-visible breakage.
-pub fn diff(base: &BTreeMap<String, DepRecord>, head: &BTreeMap<String, DepRecord>) -> DepDiff {
+fn dependency_key(row: &PerCrateDep) -> (&str, &str, &str, Option<&str>, &str) {
+    (
+        &row.crate_name,
+        &row.dep,
+        &row.pkg,
+        row.target.as_deref(),
+        row.kind.as_str(),
+    )
+}
+
+/// Compare matching dependency requirements before folding them into display rows.
+/// Feature loss and whole-dependency additions/removals retain workspace-wide policy.
+/// Only matching member/package/alias/target/kind rows establish version migrations.
+/// Each row's head optionality decides whether its major migration is breaking.
+pub fn diff(
+    base: &BTreeMap<String, DepRecord>,
+    head: &BTreeMap<String, DepRecord>,
+    base_per_crate: &[PerCrateDep],
+    head_per_crate: &[PerCrateDep],
+) -> DepDiff {
     let mut result = DepDiff::default();
+    let head_rows: BTreeMap<_, _> = head_per_crate
+        .iter()
+        .filter(|row| row.scope == Scope::External)
+        .map(|row| (dependency_key(row), row))
+        .collect();
+    let mut requirement_changes = BTreeMap::new();
+    for old in base_per_crate
+        .iter()
+        .filter(|row| row.scope == Scope::External)
+    {
+        let Some(new) = head_rows.get(&dependency_key(old)) else {
+            continue;
+        };
+        if old.req == new.req {
+            continue;
+        }
+        let bump = classify_bump(&old.req, &new.req);
+        let breaking = bump == Bump::Major && new.kind == DepKind::Runtime && !new.optional;
+        let change = requirement_changes
+            .entry((old.dep.as_str(), old.pkg.as_str()))
+            .or_insert((Bump::Unknown, false));
+        change.0 = match (change.0, bump) {
+            (Bump::Major, _) | (_, Bump::Major) => Bump::Major,
+            (Bump::Minor, _) | (_, Bump::Minor) => Bump::Minor,
+            (Bump::Patch, _) | (_, Bump::Patch) => Bump::Patch,
+            _ => Bump::Unknown,
+        };
+        change.1 |= breaking;
+    }
 
     for (name, old) in base {
         let Some(new) = head.get(name) else {
@@ -58,11 +106,18 @@ pub fn diff(base: &BTreeMap<String, DepRecord>, head: &BTreeMap<String, DepRecor
             continue;
         };
 
-        if old == new {
+        let (alias, package) = name
+            .split_once(" (pkg: ")
+            .map(|(alias, package)| (alias, package.trim_end_matches(')')))
+            .unwrap_or((name.as_str(), name.as_str()));
+        let requirement_change = requirement_changes.get(&(alias, package));
+        if old == new && requirement_change.is_none() {
             continue;
         }
 
-        let bump = classify_bump(&old.ver, &new.ver);
+        let (bump, major_breaking) = requirement_change
+            .copied()
+            .unwrap_or((Bump::Unknown, false));
         let old_label = kind_label(old.kind, old.optional);
         let new_label = kind_label(new.kind, new.optional);
         let label = if label_rank(&new_label) >= label_rank(&old_label) {
@@ -77,8 +132,8 @@ pub fn diff(base: &BTreeMap<String, DepRecord>, head: &BTreeMap<String, DepRecor
             &new.features,
         );
 
-        let breaking = label == "runtime"
-            && (bump == Bump::Major || features.split(',').any(|token| token.starts_with('-')));
+        let breaking = major_breaking
+            || (label == "runtime" && features.split(',').any(|token| token.starts_with('-')));
         if breaking {
             result.breaking += 1;
         }

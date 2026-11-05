@@ -8,12 +8,10 @@ use regex::Regex;
 use crate::model::{GroupMode, GroupRecord, Section};
 
 struct Patterns {
-    attribute: Regex,
-    generic: Regex,
     impl_prefix: Regex,
     pub_prefix: Regex,
     declaration: Regex,
-    qualifiers: Regex,
+    function: Regex,
     item_keyword: Regex,
     truncate: Regex,
     member_leaf: Regex,
@@ -26,42 +24,119 @@ struct Patterns {
 fn patterns() -> &'static Patterns {
     static PATTERNS: OnceLock<Patterns> = OnceLock::new();
     PATTERNS.get_or_init(|| Patterns {
-        attribute: Regex::new(r"^#\[[^]]*\] +").expect("valid attribute regex"),
-        generic: Regex::new(r"<[^<>]*>").expect("valid generic regex"),
         impl_prefix: Regex::new(r"^impl +").expect("valid impl regex"),
         pub_prefix: Regex::new(r"^pub +").expect("valid visibility regex"),
-        declaration: Regex::new(r"^(mod|struct|enum|trait|union) +")
+        declaration: Regex::new(r"^(?:(?:unsafe|auto) +)*(mod|struct|enum|trait|union) +")
             .expect("valid declaration regex"),
-        qualifiers: Regex::new(r"^(?:(?:const|async|unsafe) +)*").expect("valid qualifier regex"),
-        item_keyword: Regex::new(r"^(?:fn|static|type|use) +").expect("valid item keyword regex"),
+        function: Regex::new(
+            r#"^(?:(?:[a-z][a-z0-9_-]*|"[^"]*") +)*fn +"#,
+        )
+        .expect("valid function prefix regex"),
+        item_keyword: Regex::new(r"^(?:static(?: +mut)?|const|type|use|macro|proc +macro(?: +attribute| +derive)?) +")
+            .expect("valid item keyword regex"),
         truncate: Regex::new(r"[ (=].*").expect("valid truncation regex"),
         member_leaf: Regex::new(r"::[^:]+$").expect("valid member regex"),
         type_segment: Regex::new(r"::[A-Z][^:]*$").expect("valid type segment regex"),
-        declaration_kind: Regex::new(r"^pub (mod|struct|enum|trait|union) ")
+        declaration_kind: Regex::new(r"^pub (?:(?:unsafe|auto) +)*(mod|struct|enum|trait|union) ")
             .expect("valid declaration kind regex"),
         member_keyword: Regex::new(
-            r"^pub (?:mod|struct|enum|trait|union|fn|const|static|type|use|async) ",
+            r"^pub (?:mod|struct|enum|trait|union|fn|const|static|type|use|async|unsafe|macro|proc|extern|[a-z-]+ fn) ",
         )
         .expect("valid member keyword regex"),
         upper_camel: Regex::new(r"^[A-Z]").expect("valid UpperCamelCase regex"),
     })
 }
 
-fn without_attribute(signature: &str) -> String {
-    patterns().attribute.replace(signature, "").into_owned()
+/// Consumes the entire leading attribute sequence without discarding it from displayed signatures.
+pub(crate) fn without_attributes(mut signature: &str) -> &str {
+    while signature.starts_with("#[") {
+        let mut depth = 0usize;
+        let mut quoted = false;
+        let mut escaped = false;
+        let mut end = None;
+        for (index, byte) in signature.bytes().enumerate().skip(1) {
+            if quoted {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    quoted = false;
+                }
+                continue;
+            }
+            match byte {
+                b'"' => quoted = true,
+                b'[' => depth += 1,
+                b']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = Some(index + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            break;
+        };
+        signature = signature[end..].trim_start();
+    }
+    signature
+}
+
+/// Extracts a full item path, retaining owner generics.
+pub(crate) fn item_path(signature: &str) -> (String, bool) {
+    let regexes = patterns();
+    let signature = without_attributes(signature);
+    let signature = regexes.pub_prefix.replace(signature, "");
+    let declaration = regexes.declaration.is_match(&signature);
+    let path = if declaration {
+        regexes.declaration.replace(&signature, "")
+    } else if regexes.function.is_match(&signature) {
+        regexes.function.replace(&signature, "")
+    } else {
+        regexes.item_keyword.replace(&signature, "")
+    };
+    let mut depth = 0usize;
+    let mut end = path.len();
+    for (index, byte) in path.bytes().enumerate() {
+        match byte {
+            b'<' | b'[' => depth += 1,
+            b'>' | b']' if depth > 0 && (index == 0 || path.as_bytes()[index - 1] != b'-') => {
+                depth -= 1;
+            }
+            b' ' | b'(' | b'=' | b':'
+                if depth == 0
+                    && (byte != b':'
+                        || path.as_bytes().get(index + 1) != Some(&b':')
+                            && (index == 0 || path.as_bytes()[index - 1] != b':')) =>
+            {
+                end = index;
+                break;
+            }
+            _ => {}
+        }
+    }
+    (path[..end].to_string(), declaration)
 }
 
 fn group_key(signature: &str) -> String {
     let regexes = patterns();
-    let mut signature = without_attribute(signature);
-
-    loop {
-        let stripped = regexes.generic.replace_all(&signature, "").into_owned();
-        if stripped == signature {
-            break;
+    let mut signature_without_generics = String::new();
+    let mut depth = 0usize;
+    let mut previous = '\0';
+    for character in without_attributes(signature).chars() {
+        match character {
+            '<' => depth += 1,
+            '>' if depth > 0 && previous != '-' => depth -= 1,
+            _ if depth == 0 => signature_without_generics.push(character),
+            _ => {}
         }
-        signature = stripped;
+        previous = character;
     }
+    let signature = signature_without_generics;
 
     let (mut key, declaration) = if regexes.impl_prefix.is_match(&signature) {
         let signature = regexes.impl_prefix.replace(&signature, "").into_owned();
@@ -72,15 +147,8 @@ fn group_key(signature: &str) -> String {
             });
         (key.to_string(), true)
     } else {
-        let mut signature = regexes.pub_prefix.replace(&signature, "").into_owned();
-        let declaration = regexes.declaration.is_match(&signature);
-        if declaration {
-            signature = regexes.declaration.replace(&signature, "").into_owned();
-        } else {
-            signature = regexes.qualifiers.replace(&signature, "").into_owned();
-            signature = regexes.item_keyword.replace(&signature, "").into_owned();
-        }
-        (signature, declaration)
+        let (path, declaration) = item_path(&signature);
+        (path, declaration)
     };
 
     key = regexes.truncate.replace(&key, "").into_owned();
@@ -105,17 +173,17 @@ fn mod_of(key: &str) -> String {
 }
 
 fn decl_kind(signature: &str) -> Option<String> {
-    let signature = without_attribute(signature);
+    let signature = without_attributes(signature);
     patterns()
         .declaration_kind
-        .captures(&signature)
+        .captures(signature)
         .and_then(|captures| captures.get(1))
         .map(|kind| kind.as_str().to_string())
 }
 
 fn member_kind(signature: &str) -> Option<String> {
-    let signature = without_attribute(signature);
-    if !signature.starts_with("pub ") || patterns().member_keyword.is_match(&signature) {
+    let signature = without_attributes(signature);
+    if !signature.starts_with("pub ") || patterns().member_keyword.is_match(signature) {
         return None;
     }
     Some(if signature.contains(": ") {
@@ -138,21 +206,19 @@ fn fallback_kind(key: &str) -> String {
 struct Kinds<'a> {
     /// Kinds read from a declaration present in the diff.
     declared: HashMap<String, String>,
-    /// Kinds read from the head source, keyed by short name.
+    /// Kinds read from the head source, keyed by full owner path.
     src: &'a HashMap<String, String>,
     /// Kinds weakly inferred from a member.
     member: HashMap<String, String>,
 }
 
 impl Kinds<'_> {
-    /// Resolved kind: declared in the diff > head source by short name > inferred from a
-    /// member > naming convention.
+    /// Resolved kind: declaration > full source path > member > naming convention.
     fn resolve(&self, key: &str) -> String {
         if let Some(kind) = self.declared.get(key) {
             return kind.clone();
         }
-        let short_name = key.rsplit("::").next().unwrap_or(key);
-        if let Some(kind) = self.src.get(short_name) {
+        if let Some(kind) = self.src.get(key) {
             return kind.clone();
         }
         self.member

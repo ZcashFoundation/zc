@@ -1,10 +1,8 @@
 //! Keep a Changelog rendering for public API diff lines.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
 
-use regex::Regex;
-
+use crate::group::{item_path, without_attributes};
 use crate::model::Section;
 use crate::traitmap::TraitMap;
 
@@ -40,265 +38,6 @@ const BOILERPLATE: &[&str] = &[
     "next",
 ];
 
-fn inner_generic_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"<[^<>]*>").expect("valid inner-generic regex"))
-}
-
-fn long_path_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*::").expect("valid path regex")
-    })
-}
-
-fn lifetime_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"'[A-Za-z_][A-Za-z0-9_]* *").expect("valid lifetime regex"))
-}
-
-fn generic_leading_comma_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"< *, *").expect("valid generic-list regex"))
-}
-
-fn generic_trailing_comma_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r" *, *>").expect("valid generic-list regex"))
-}
-
-fn attribute_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^#\[[^]]*\] +").expect("valid attribute regex"))
-}
-fn pub_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^pub +").expect("valid visibility regex"))
-}
-
-fn pub_module_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^pub +mod +").expect("valid public-module regex"))
-}
-
-fn impl_keyword_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^impl +").expect("valid impl-keyword regex"))
-}
-
-fn qualifiers_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^(?:(?:const|async|unsafe) +)*").expect("valid qualifier regex"))
-}
-
-fn item_keyword_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^(?:fn|static|type|use) +").expect("valid item-keyword regex"))
-}
-fn qualified_item_keyword_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^(?:fn|static|type|use|mod|struct|enum|trait|union) +")
-            .expect("valid qualified-item keyword regex")
-    })
-}
-
-fn declaration_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^(?:mod|struct|enum|trait|union) +").expect("valid declaration regex")
-    })
-}
-
-fn impl_generics_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^impl *<[^<>]*>").expect("valid impl-generics regex"))
-}
-
-fn arbitrary_impl_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^impl[ <].*Arbitrary.* for ").expect("valid Arbitrary-impl regex")
-    })
-}
-
-fn proptest_assoc_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^(?:pub +)?type [^=]*::(?:Parameters|Strategy) =")
-            .expect("valid proptest-associated-type regex")
-    })
-}
-
-fn proptest_method_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"::(?:arbitrary|arbitrary_with)\(").expect("valid proptest-method regex")
-    })
-}
-
-fn structural_eq_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^impl[ <].*Structural(?:Partial)?Eq.* for ")
-            .expect("valid structural-equality regex")
-    })
-}
-
-fn strip_inner_generics(mut value: String) -> String {
-    while let Some(found) = inner_generic_re().find(&value) {
-        value.replace_range(found.range(), "");
-    }
-    value
-}
-
-fn last_seg(path: &str) -> String {
-    let path = strip_inner_generics(path.to_string());
-    path.rsplit("::").next().unwrap_or(&path).to_string()
-}
-
-/// Returns the first balanced generic argument list, or the unmatched suffix.
-fn outer_gen(path: &str) -> Option<&str> {
-    let start = path.find('<')?;
-    let mut depth = 0usize;
-    for (offset, byte) in path.as_bytes()[start..].iter().enumerate() {
-        match byte {
-            b'<' => depth += 1,
-            b'>' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(&path[start..start + offset + 1]);
-                }
-            }
-            _ => {}
-        }
-    }
-    Some(&path[start..])
-}
-
-fn keep2(path: &str) -> String {
-    let mut path = path.to_string();
-    while let Some(found) = long_path_re().find(&path) {
-        let matched = &path[found.range()];
-        let remove_len = matched.find("::").map_or(0, |colon| colon + 2);
-        if remove_len == 0 {
-            break;
-        }
-        path.replace_range(found.start()..found.start() + remove_len, "");
-    }
-    path
-}
-
-fn short_gen(generics: &str) -> String {
-    let mut generics = lifetime_re().replace_all(generics, "").into_owned();
-    generics = generics.replace("<>", "");
-    generics = generic_leading_comma_re()
-        .replace_all(&generics, "<")
-        .into_owned();
-    generics = generic_trailing_comma_re()
-        .replace_all(&generics, ">")
-        .into_owned();
-    keep2(&generics)
-}
-
-fn shorten_inner_gen(path: &str) -> String {
-    let Some(generics) = outer_gen(path) else {
-        return path.to_string();
-    };
-    let start = path.find('<').unwrap_or(path.len());
-    let end = start + generics.len();
-    format!("{}{}{}", &path[..start], short_gen(generics), &path[end..])
-}
-
-fn self_generics(signature: &str, self_short: &str) -> String {
-    let needle = format!("{self_short}<");
-    let Some(start) = signature.find(&needle) else {
-        return String::new();
-    };
-    let suffix = &signature[start + self_short.len()..];
-    outer_gen(suffix).map(short_gen).unwrap_or_default()
-}
-
-fn trait_disp(trait_path: &str) -> String {
-    let Some(generics) = outer_gen(trait_path) else {
-        return last_seg(trait_path);
-    };
-    let start = trait_path.find('<').unwrap_or(trait_path.len());
-    format!("{}{}", last_seg(&trait_path[..start]), short_gen(generics))
-}
-
-fn strip_attribute(value: &str) -> String {
-    attribute_re().replace(value, "").into_owned()
-}
-
-fn strip_pub(value: &str) -> String {
-    pub_re().replace(value, "").into_owned()
-}
-
-fn strip_item_prefix(value: &str) -> String {
-    let value = qualifiers_re().replace(value, "");
-    item_keyword_re().replace(&value, "").into_owned()
-}
-
-fn truncate_item(mut path: String) -> String {
-    if let Some(at) = path.find([' ', '(', '=']) {
-        path.truncate(at);
-    }
-    if path.ends_with(':') {
-        path.pop();
-    }
-    path
-}
-
-fn group_key(signature: &str) -> String {
-    let mut signature = strip_inner_generics(strip_attribute(signature));
-    let is_declaration;
-    let path;
-    if signature.starts_with("impl ") {
-        signature = impl_keyword_re().replace(&signature, "").into_owned();
-        if let Some(at) = signature.rfind(" for ") {
-            signature = signature[at + 5..].to_string();
-        }
-        path = signature;
-        is_declaration = true;
-    } else {
-        signature = strip_pub(&signature);
-        if declaration_re().is_match(&signature) {
-            path = declaration_re().replace(&signature, "").into_owned();
-            is_declaration = true;
-        } else {
-            path = strip_item_prefix(&signature);
-            is_declaration = false;
-        }
-    }
-
-    let mut path = truncate_item(path);
-    if !is_declaration {
-        if let Some(at) = path.rfind("::") {
-            path.truncate(at);
-        }
-    }
-    path
-}
-
-fn qual_path(signature: &str, crate_prefix: &str) -> String {
-    let mut signature = strip_attribute(signature);
-    signature = impl_generics_re().replace(&signature, "impl").into_owned();
-    if signature.starts_with("impl ") {
-        if !crate_prefix.is_empty() {
-            signature = signature.replace(&format!("{crate_prefix}::"), "");
-        }
-        return signature;
-    }
-
-    signature = strip_pub(&signature);
-    signature = qualifiers_re().replace(&signature, "").into_owned();
-    signature = qualified_item_keyword_re()
-        .replace(&signature, "")
-        .into_owned();
-    truncate_item(strip_inner_generics(signature))
-}
-
 fn disp(path: &str, crate_prefix: &str) -> String {
     if crate_prefix.is_empty() {
         return path.to_string();
@@ -319,19 +58,146 @@ fn member_disp(path: &str, group: &str, crate_prefix: &str) -> String {
 }
 
 fn relsig(signature: &str, crate_prefix: &str) -> String {
-    let mut signature = strip_attribute(signature);
-    signature = strip_pub(&signature);
-    if !crate_prefix.is_empty() {
-        signature = signature.replace(&format!("{crate_prefix}::"), "");
-    }
-    signature
+    let body = without_attributes(signature);
+    let attributes = &signature[..signature.len() - body.len()];
+    let body = body.strip_prefix("pub ").unwrap_or(body);
+    let body = if crate_prefix.is_empty() {
+        body.to_string()
+    } else {
+        body.replace(&format!("{crate_prefix}::"), "")
+    };
+    format!("{attributes}{body}")
 }
 
-fn is_proptest(signature: &str) -> bool {
-    signature.contains("proptest::")
-        || arbitrary_impl_re().is_match(signature)
-        || proptest_assoc_re().is_match(signature)
-        || proptest_method_re().is_match(signature)
+fn impl_body(signature: &str) -> Option<(&str, &str)> {
+    let signature = without_attributes(signature).strip_prefix("impl")?;
+    if let Some(generics) = signature.strip_prefix('<') {
+        let mut depth = 1usize;
+        for (index, byte) in generics.bytes().enumerate() {
+            match byte {
+                b'<' => depth += 1,
+                b'>' if index == 0 || generics.as_bytes()[index - 1] != b'-' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((&signature[..index + 2], generics[index + 1..].trim_start()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+    Some(("", signature.trim_start()))
+}
+
+// A where-clause constrains an impl, but is not part of its owner's identity.
+fn split_where(body: &str) -> (&str, &str) {
+    let mut depth = 0usize;
+    let mut braces = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, byte) in body.bytes().enumerate() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => quoted = true,
+            b'{' => braces += 1,
+            b'}' => braces = braces.saturating_sub(1),
+            b'<' | b'(' | b'[' if braces == 0 => depth += 1,
+            b'>' | b')' | b']'
+                if braces == 0 && (index == 0 || body.as_bytes()[index - 1] != b'-') =>
+            {
+                depth = depth.saturating_sub(1);
+            }
+            b' ' if depth == 0 && braces == 0 && body[index..].starts_with(" where ") => {
+                return (&body[..index], &body[index..]);
+            }
+            _ => {}
+        }
+    }
+    (body, "")
+}
+
+fn qual_path(signature: &str) -> String {
+    if impl_body(signature).is_some() {
+        without_attributes(signature).to_string()
+    } else {
+        item_path(signature).0
+    }
+}
+
+fn group_key(signature: &str) -> String {
+    if let Some((_, body)) = impl_body(signature) {
+        let (body, _) = split_where(body);
+        return body
+            .rsplit_once(" for ")
+            .map_or(body, |(_, owner)| owner)
+            .to_string();
+    }
+    let (path, declaration) = item_path(signature);
+    if declaration {
+        path
+    } else {
+        member_owner(&path).map_or_else(|| path.clone(), |(owner, _)| owner.to_string())
+    }
+}
+
+fn member_owner(path: &str) -> Option<(&str, &str)> {
+    let mut path = path;
+    if path.ends_with('>') {
+        let mut depth = 0usize;
+        for (index, byte) in path.bytes().enumerate().rev() {
+            match byte {
+                b'>' if index == 0 || path.as_bytes()[index - 1] != b'-' => depth += 1,
+                b'<' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        path = &path[..index];
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    path.rsplit_once("::")
+}
+
+fn attribution<'a>(path: &str, traits: &'a TraitMap) -> Option<&'a str> {
+    let (owner, member) = member_owner(path)?;
+    traits
+        .get(&(owner.to_string(), member.to_string()))?
+        .as_deref()
+}
+
+fn is_proptest(signature: &str, traits: &TraitMap) -> bool {
+    let trait_path = impl_body(signature)
+        .and_then(|(_, body)| body.rsplit_once(" for ").map(|(path, _)| path))
+        .or_else(|| attribution(&item_path(signature).0, traits));
+    trait_path.is_some_and(|path| {
+        path == "proptest::arbitrary::Arbitrary"
+            || path.starts_with("proptest::arbitrary::Arbitrary<")
+    })
+}
+
+fn trait_disp(path: &str, crate_prefix: &str) -> String {
+    for prefix in ["core::", "std::", "alloc::"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            let (name, args) = rest
+                .find(['<', '('])
+                .map_or((rest, ""), |at| rest.split_at(at));
+            return format!("{}{args}", name.rsplit("::").next().unwrap_or(name));
+        }
+    }
+    disp(path, crate_prefix)
 }
 
 struct ImplGroup {
@@ -342,36 +208,34 @@ struct ImplGroup {
 
 fn impl_group(
     signature: &str,
-    group: &str,
     qualified_path: &str,
     crate_prefix: &str,
     traits: &TraitMap,
 ) -> Option<ImplGroup> {
-    if qualified_path.starts_with("impl ") {
-        let body = qualified_path.strip_prefix("impl ")?.trim_start();
-        let first_for = body.find(" for ")?;
-        let last_for = body.rfind(" for ")?;
-        let trait_path = &body[..first_for];
-        let self_path = &body[last_for + 5..];
-        let self_path = shorten_inner_gen(self_path);
+    if let Some((generics, body)) = impl_body(signature) {
+        let (body, where_clause) = split_where(body);
+        let (trait_path, self_path) = body.rsplit_once(" for ")?;
         return Some(ImplGroup {
-            key: format!("impl {} for {self_path}", last_seg(trait_path)),
+            key: format!("impl {trait_path} for {self_path}"),
             is_header: true,
-            header_text: Some(format!("impl {} for {self_path}", trait_disp(trait_path))),
+            header_text: Some(format!(
+                "impl{generics} {} for {}{where_clause}",
+                trait_disp(trait_path, crate_prefix),
+                disp(self_path, crate_prefix),
+            )),
         });
     }
 
-    let self_short = last_seg(group);
-    let member = last_seg(qualified_path);
-    let trait_path = traits.get(&(self_short.clone(), member))?;
+    let trait_path = attribution(qualified_path, traits)?;
+    let (owner, _) = member_owner(qualified_path)?;
     Some(ImplGroup {
-        key: format!(
-            "impl {trait_path} for {}{}",
-            disp(group, crate_prefix),
-            self_generics(signature, &self_short)
-        ),
+        key: format!("impl {trait_path} for {owner}"),
         is_header: false,
-        header_text: None,
+        header_text: Some(format!(
+            "impl {} for {}",
+            trait_disp(trait_path, crate_prefix),
+            disp(owner, crate_prefix),
+        )),
     })
 }
 
@@ -386,22 +250,16 @@ struct Group {
 fn render_changed(lines: &[String], crate_prefix: &str) -> Vec<String> {
     let mut output = Vec::new();
     let mut pending = String::new();
-    let mut skip = false;
     let mut seen = HashSet::new();
 
     for buffered in lines.iter().filter(|line| !line.trim().is_empty()) {
         if let Some(old) = buffered.strip_prefix("  - ") {
-            skip = is_proptest(old);
             pending = relsig(old, crate_prefix);
             continue;
         }
         let Some(new) = buffered.strip_prefix("  + ") else {
             continue;
         };
-        if skip {
-            skip = false;
-            continue;
-        }
         let new = relsig(new, crate_prefix);
         if !seen.insert((pending.clone(), new.clone())) {
             continue;
@@ -422,18 +280,15 @@ fn render_plain(lines: &[String], crate_prefix: &str, traits: &TraitMap) -> Vec<
     let mut lazy_static = HashSet::new();
     let mut added_modules = Vec::new();
     for line in &buffered {
-        if (line.starts_with("impl<") || line.starts_with("impl "))
-            && line.contains("LazyStatic")
-            && line.contains(" for ")
-        {
+        if impl_body(line).is_some_and(|(_, body)| {
+            body.starts_with("lazy_static::") && body.contains("LazyStatic for ")
+        }) {
             lazy_static.insert(group_key(line));
         }
 
-        let module = strip_attribute(line);
-        if pub_module_re().is_match(&module) {
-            let module = pub_module_re().replace(&module, "").into_owned();
-            if !added_modules.contains(&module) {
-                added_modules.push(module);
+        if let Some(module) = without_attributes(line).strip_prefix("pub mod ") {
+            if !added_modules.iter().any(|existing| existing == module) {
+                added_modules.push(module.to_string());
             }
         }
     }
@@ -443,16 +298,21 @@ fn render_plain(lines: &[String], crate_prefix: &str, traits: &TraitMap) -> Vec<
     let mut seen_items = HashSet::<(String, String)>::new();
 
     for signature in buffered {
-        let impl_line = signature.starts_with("impl<") || signature.starts_with("impl ");
-        if impl_line && !signature.contains(" for ") {
+        let impl_line = impl_body(signature);
+        if impl_line.is_some_and(|(_, body)| !body.contains(" for ")) {
             continue;
         }
-        if is_proptest(signature) || structural_eq_re().is_match(signature) {
+        if is_proptest(signature, traits)
+            || impl_line.is_some_and(|(_, body)| {
+                body.starts_with("core::marker::StructuralPartialEq for ")
+                    || body.starts_with("core::marker::StructuralEq for ")
+            })
+        {
             continue;
         }
 
         let original_group = group_key(signature);
-        let qualified_path = qual_path(signature, crate_prefix);
+        let qualified_path = qual_path(signature);
         if lazy_static.contains(&original_group) && qualified_path != original_group {
             continue;
         }
@@ -462,17 +322,11 @@ fn render_plain(lines: &[String], crate_prefix: &str, traits: &TraitMap) -> Vec<
         }) {
             continue;
         }
-        if !seen_items.insert((original_group.clone(), qualified_path.clone())) {
+        if !seen_items.insert((original_group.clone(), signature.to_string())) {
             continue;
         }
 
-        let impl_info = impl_group(
-            signature,
-            &original_group,
-            &qualified_path,
-            crate_prefix,
-            traits,
-        );
+        let impl_info = impl_group(signature, &qualified_path, crate_prefix, traits);
         let key = impl_info
             .as_ref()
             .map_or_else(|| original_group.clone(), |info| info.key.clone());
@@ -490,12 +344,20 @@ fn render_plain(lines: &[String], crate_prefix: &str, traits: &TraitMap) -> Vec<
         let group = &mut groups[index];
         if let Some(info) = impl_info {
             group.is_impl = true;
-            if info.is_header {
+            if info.is_header || group.header_text.is_none() {
                 group.header_text = info.header_text;
-            } else {
-                group.members.push(last_seg(&qualified_path));
             }
-        } else {
+            if !info.is_header {
+                let member = member_owner(&qualified_path)
+                    .map_or(qualified_path.as_str(), |(owner, _)| {
+                        &qualified_path[owner.len() + 2..]
+                    })
+                    .to_string();
+                if !group.members.contains(&member) {
+                    group.members.push(member);
+                }
+            }
+        } else if !group.members.contains(&qualified_path) {
             group.members.push(qualified_path);
         }
     }
@@ -526,6 +388,8 @@ fn emit_groups(groups: Vec<Group>, crate_prefix: &str) -> Vec<String> {
                     if let Some((trait_path, self_path)) = suffix.split_once(" for ") {
                         memberless.push((trait_path.to_string(), self_path.to_string()));
                     }
+                } else {
+                    output.push(format!("- `{header}`"));
                 }
                 continue;
             }

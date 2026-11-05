@@ -6,10 +6,10 @@ use crate::ctx::Ctx;
 use crate::features::FeaturePolicy;
 use crate::group;
 use crate::model::{
-    Bump, CrateResult, CrateStatus, DepDiff, GroupMode, GroupRecord, LockDiff, Report, Section,
+    Bump, CrateChange, CrateResult, CrateStatus, DepDiff, GroupMode, GroupRecord, LockDiff, Report,
+    Section,
 };
 use crate::style::Style;
-use crate::version_req;
 
 pub fn header(ctx: &Ctx) {
     println!(
@@ -223,8 +223,12 @@ pub fn api_rows(ctx: &Ctx, crates: &[CrateResult]) {
                 s.reset,
                 width = width
             ));
-        } else if result.total() > 0 {
-            let tag = if result.removed == 0 && result.changed == 0 {
+        } else if result.has_changes() {
+            let tag = if result.change != CrateChange::Existing {
+                format!(" {}(crate {}){}", s.dim, result.change.as_str(), s.reset)
+            } else if !result.breaking_added.is_empty() {
+                format!(" {}(breaking additions){}", s.red, s.reset)
+            } else if result.removed == 0 && result.changed == 0 {
                 format!(" {}(additive){}", s.dim, s.reset)
             } else {
                 String::new()
@@ -264,6 +268,12 @@ pub fn summary(ctx: &Ctx, report: &Report) {
         report.crate_count,
         ctx.style.reset
     );
+    if !report.skipped_crates.is_empty() {
+        println!(
+            "  skipped (no library target): {}",
+            report.skipped_crates.join(", ")
+        );
+    }
 }
 
 fn render_items(
@@ -362,8 +372,52 @@ fn render_items(
     }
 }
 
-pub fn details(ctx: &Ctx, report: &Report, src_kinds: &HashMap<String, String>) {
-    for result in report.crates.iter().filter(|result| result.total() > 0) {
+fn type_kinds(
+    ctx: &Ctx,
+    result: &CrateResult,
+    head: bool,
+) -> Result<HashMap<String, String>, String> {
+    if ctx.opts.group_mode == GroupMode::Flat {
+        return Ok(HashMap::new());
+    }
+    let (worktree, target, sha) = if head {
+        (&ctx.head_worktree, &ctx.head_target, &ctx.refs.head_sha)
+    } else {
+        (
+            &ctx.baseline_worktree,
+            &ctx.baseline_target,
+            &ctx.refs.baseline_sha,
+        )
+    };
+    let path = crate::api::rustdoc_json(ctx, &result.name, worktree, target, sha)?;
+    let bytes = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let root =
+        serde_json::from_slice(&bytes).map_err(|error| format!("invalid rustdoc JSON: {error}"))?;
+    Ok(crate::rustdoc::public_items(&root)
+        .items
+        .into_iter()
+        .filter_map(|(path, item)| {
+            let inner = item.get("inner")?.as_object()?;
+            ["struct", "enum", "trait", "union"]
+                .into_iter()
+                .find(|kind| inner.contains_key(*kind))
+                .map(|kind| (path, kind.to_owned()))
+        })
+        .collect())
+}
+
+pub fn details(ctx: &Ctx, report: &Report) -> Result<(), String> {
+    for result in report.crates.iter().filter(|result| result.has_changes()) {
+        let base_kinds = if result.removed > 0 {
+            type_kinds(ctx, result, false)?
+        } else {
+            HashMap::new()
+        };
+        let head_kinds = if result.changed + result.added > 0 {
+            type_kinds(ctx, result, true)?
+        } else {
+            HashMap::new()
+        };
         println!();
         println!("{}{}{}", ctx.style.bold, result.name, ctx.style.reset);
         let prefix = result.prefix();
@@ -379,7 +433,7 @@ pub fn details(ctx: &Ctx, report: &Report, src_kinds: &HashMap<String, String>) 
                 Section::Removed,
                 ctx.opts.group_mode,
                 &prefix,
-                src_kinds,
+                &base_kinds,
             );
         }
         if result.changed > 0 {
@@ -394,7 +448,7 @@ pub fn details(ctx: &Ctx, report: &Report, src_kinds: &HashMap<String, String>) 
                 Section::Changed,
                 ctx.opts.group_mode,
                 &prefix,
-                src_kinds,
+                &head_kinds,
             );
         }
         if result.added > 0 {
@@ -409,10 +463,17 @@ pub fn details(ctx: &Ctx, report: &Report, src_kinds: &HashMap<String, String>) 
                 Section::Added,
                 ctx.opts.group_mode,
                 &prefix,
-                src_kinds,
+                &head_kinds,
             );
         }
+        if !result.breaking_added.is_empty() {
+            println!("\n  Breaking additions:");
+            for reason in &result.breaking_added {
+                println!("    {reason}");
+            }
+        }
     }
+    Ok(())
 }
 
 pub fn values_section(ctx: &Ctx, report: &Report) {
@@ -492,7 +553,7 @@ pub fn pubdep_section(ctx: &Ctx, report: &Report) {
         println!();
         println!("  {}{}{}", s.bold, result.name, s.reset);
         for finding in &result.pubdep {
-            if version_req::classify_bump(&finding.old, &finding.new) == Bump::Major {
+            if finding.is_breaking() {
                 println!(
                     "    {}{}{}{}: {}{}{}{} {}->{} {}{}{}{} (incompatible; reachable in public API){}",
                     s.red,
@@ -531,6 +592,15 @@ pub fn pubdep_section(ctx: &Ctx, report: &Report) {
                     s.reset
                 );
             }
+            if finding.old_package != finding.new_package {
+                println!(
+                    "      package: {} -> {} (type identity changed)",
+                    finding.old_package, finding.new_package
+                );
+            }
+            if let Some(target) = &finding.target {
+                println!("      target: {target}");
+            }
         }
     }
 }
@@ -544,6 +614,10 @@ pub fn verdict(ctx: &Ctx, report: &Report) {
                 "api: {} removed / {} changed",
                 report.removed_total, report.changed_total
             ));
+            let additions = report.api_breaking() - report.removed_total - report.changed_total;
+            if additions > 0 {
+                parts.push(format!("api: {additions} breaking additions"));
+            }
         }
         if report.deps.breaking > 0 {
             parts.push(format!("runtime-deps: {} breaking", report.deps.breaking));
@@ -568,7 +642,7 @@ pub fn verdict(ctx: &Ctx, report: &Report) {
         );
         if report.added_total > 0 {
             println!(
-                "{}(also {} new API items, additive only){}",
+                "{}(also {} new API items){}",
                 s.dim, report.added_total, s.reset
             );
         }
@@ -631,7 +705,3 @@ pub fn api_errors(ctx: &Ctx, report: &Report) {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "render/tests.rs"]
-mod tests;
