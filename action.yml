@@ -68,13 +68,47 @@ runs:
         ZC_TOOLCHAIN: nightly-2026-10-15
       run: rustup toolchain install "$ZC_TOOLCHAIN" --profile minimal --no-self-update
 
+    - name: Identify cargo-public-api cache
+      id: cargo-public-api-cache
+      shell: bash
+      run: |
+        # Cache Linux/glibc Cargo-bin installs; add platform fingerprints for other runners.
+        cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+        if [[ "$RUNNER_OS" == Linux && -d "$cargo_bin" && -r /etc/os-release ]] &&
+           [[ ${CARGO_INSTALL_ROOT+x} != x ]] &&
+           [[ "$(type -P cargo)" == "$cargo_bin/cargo"* ]] &&
+           cargo +nightly-2026-10-15 -Z unstable-options config get >/dev/null 2>&1 &&
+           ! cargo +nightly-2026-10-15 -Z unstable-options config get install.root >/dev/null 2>&1 &&
+           abi="$(getconf GNU_LIBC_VERSION 2>/dev/null)" &&
+           image="$(sha256sum /etc/os-release)"; then
+          printf 'platform=%s-%s\n' "${image%% *}" "${abi// /-}" >> "$GITHUB_OUTPUT"
+          printf 'path=%s/cargo-public-api\n' "$cargo_bin" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Restore cargo-public-api
+      id: cargo-public-api
+      if: steps.cargo-public-api-cache.outputs.platform != ''
+      uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: ${{ steps.cargo-public-api-cache.outputs.path }}
+        # The version must match the one installed below.
+        key: cargo-public-api-0.52.0-${{ runner.os }}-${{ runner.arch }}-${{ steps.cargo-public-api-cache.outputs.platform }}
+
     - name: Install cargo-public-api
+      if: steps.cargo-public-api.outputs.cache-hit != 'true'
       uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
       with:
         tool: cargo-public-api@0.52.0
         checksum: true
       env:
         RUSTUP_TOOLCHAIN: nightly-2026-10-15
+
+    - name: Save cargo-public-api
+      if: steps.cargo-public-api-cache.outputs.platform != '' && steps.cargo-public-api.outputs.cache-hit != 'true' && github.event_name == 'push'
+      uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: ${{ steps.cargo-public-api-cache.outputs.path }}
+        key: ${{ steps.cargo-public-api.outputs.cache-primary-key }}
 
     - name: Check the public API and dependencies
       id: check
