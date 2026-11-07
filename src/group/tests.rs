@@ -160,6 +160,26 @@ fn groups_public_api_items() {
 }
 
 #[test]
+fn module_declarations_preserve_root_and_shorten_children() {
+    let records = group(
+        &lines(&["pub mod zc_fixture", "pub mod zc_fixture::nested"]),
+        Section::Removed,
+        GroupMode::Mod,
+        "zc_fixture",
+        &HashMap::new(),
+    );
+    let items = records
+        .iter()
+        .filter_map(|record| match record {
+            GroupRecord::Item(item) => Some(item.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(items.contains(&"pub mod zc_fixture"), "{items:?}");
+    assert!(items.contains(&"pub mod nested"), "{items:?}");
+}
+
+#[test]
 fn multiple_attributes_and_abi_functions_group_under_their_actual_module() {
     let signatures = lines(&[
         "#[link_section = \".custom\"] #[no_mangle] pub static zc_fixture::nested::COUNT: u8",

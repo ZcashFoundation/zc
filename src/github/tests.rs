@@ -151,6 +151,38 @@ fn an_analysis_failure_names_the_crate_and_its_stage() {
 }
 
 #[test]
+fn one_sided_failures_retain_lifecycle_context_without_successful_changes() {
+    let mut report = report();
+    for (name, change, stage) in [
+        ("newborn", CrateChange::Added, ErrorStage::HeadBuild),
+        ("vanished", CrateChange::Removed, ErrorStage::BaselineBuild),
+    ] {
+        let mut failing = crate_result(name, 0, 0, 0);
+        failing.change = change;
+        failing.status = CrateStatus::Error;
+        failing.error = Some(ApiError {
+            stage,
+            ref_label: "ref".to_string(),
+            ref_sha: "2".repeat(40),
+            command: "cargo public-api".to_string(),
+            stderr: String::new(),
+            hint: "hint".to_string(),
+        });
+        report.crates.push(failing);
+    }
+    report.error_crate_count = report.crates.len();
+    let messages = annotations(&report, FailOn::None).join("\n");
+    let summary = super::step_summary(&report);
+    for context in [
+        "newborn (crate added) (head_build)",
+        "vanished (crate removed) (baseline_build)",
+    ] {
+        assert!(messages.contains(context), "{messages}");
+        assert!(summary.contains(context), "{summary}");
+    }
+}
+
+#[test]
 fn a_clean_report_is_not_annotated() {
     assert!(annotations(&report(), FailOn::Breaking).is_empty());
 }

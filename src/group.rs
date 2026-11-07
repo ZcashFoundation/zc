@@ -281,10 +281,10 @@ fn emit_module(
         if key == module {
             for &index in type_members {
                 let mut display = lines[index].text.replace(&module_prefix, "");
-                if display.starts_with("pub mod ") {
-                    let name = display
-                        .rsplit_once("::")
-                        .map_or(display.as_str(), |(_, name)| name);
+                if let Some((_, name)) = display
+                    .strip_prefix("pub mod ")
+                    .and_then(|path| path.rsplit_once("::"))
+                {
                     display = format!("pub mod {name}");
                 }
                 records.push(GroupRecord::Item(display));
