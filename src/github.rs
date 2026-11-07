@@ -105,13 +105,22 @@ pub fn step_summary(report: &Report) -> String {
         let _ = writeln!(out, "| {label} | {count} |");
     }
 
+    if report.error_crate_count > 0 {
+        let _ = writeln!(
+            out,
+            "\nFailed crates: {}\n",
+            failed_crates(report).join(", ")
+        );
+    }
+
     if report.changed_crate_count > 0 {
         out.push_str("\n| Crate | Removed | Changed | Added | Breaking additions |\n| --- | ---: | ---: | ---: | ---: |\n");
         for result in report.crates.iter().filter(|result| result.has_changes()) {
             let _ = writeln!(
                 out,
-                "| {} | {} | {} | {} | {} |",
+                "| {}{} | {} | {} | {} | {} |",
                 result.name,
+                result.change.report_suffix(),
                 result.removed,
                 result.changed,
                 result.added,
@@ -133,7 +142,7 @@ fn broken_crates(report: &Report) -> Vec<String> {
                 || !result.breaking_added.is_empty()
                 || result.pubdep.iter().any(|finding| finding.is_breaking())
         })
-        .map(|result| result.name.clone())
+        .map(|result| format!("{}{}", result.name, result.change.report_suffix()))
         .collect()
 }
 
@@ -160,8 +169,13 @@ fn failed_crates(report: &Report) -> Vec<String> {
         .iter()
         .filter(|result| result.status == CrateStatus::Error)
         .map(|result| match &result.error {
-            Some(error) => format!("{} ({})", result.name, error.stage.as_str()),
-            None => result.name.clone(),
+            Some(error) => format!(
+                "{}{} ({})",
+                result.name,
+                result.change.report_suffix(),
+                error.stage.as_str()
+            ),
+            None => format!("{}{}", result.name, result.change.report_suffix()),
         })
         .collect()
 }

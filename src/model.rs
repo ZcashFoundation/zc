@@ -317,6 +317,15 @@ impl CrateChange {
             Self::Removed => "removed",
         }
     }
+
+    /// Lifecycle marker for human reports; existing libraries need no marker.
+    pub fn report_suffix(self) -> &'static str {
+        match self {
+            Self::Existing => "",
+            Self::Added => " (crate added)",
+            Self::Removed => " (crate removed)",
+        }
+    }
 }
 
 /// Stage at which per-crate analysis failed.

@@ -213,7 +213,7 @@ pub fn api_rows(ctx: &Ctx, crates: &[CrateResult]) {
                 .filter(|line| !line.is_empty())
                 .unwrap_or("cargo public-api failed");
             rows.push_str(&format!(
-                "  {:<width$} {}error{}: {}{} ({}){}\n",
+                "  {:<width$} {}error{}: {}{} ({}){}{}\n",
                 result.name,
                 s.red,
                 s.reset,
@@ -221,11 +221,12 @@ pub fn api_rows(ctx: &Ctx, crates: &[CrateResult]) {
                 s.dim,
                 first,
                 s.reset,
+                result.change.report_suffix(),
                 width = width
             ));
         } else if result.has_changes() {
             let tag = if result.change != CrateChange::Existing {
-                format!(" {}(crate {}){}", s.dim, result.change.as_str(), s.reset)
+                format!("{}{}{}", s.dim, result.change.report_suffix(), s.reset)
             } else if !result.breaking_added.is_empty() {
                 format!(" {}(breaking additions){}", s.red, s.reset)
             } else if result.removed == 0 && result.changed == 0 {
@@ -690,7 +691,13 @@ pub fn api_errors(ctx: &Ctx, report: &Report) {
             None => continue,
         };
         eprintln!();
-        eprintln!("  {}{}{}", s.bold, result.name, s.reset);
+        eprintln!(
+            "  {}{}{}{}",
+            s.bold,
+            result.name,
+            s.reset,
+            result.change.report_suffix()
+        );
         eprintln!("    stage: {}", error.stage.as_str());
         eprintln!("    ref: {} ({})", error.ref_label, error.ref_sha);
         eprintln!("    command: {}", error.command);

@@ -256,6 +256,16 @@ audit_regressions() {
     assert_eq "$?" 1 "crate membership: removed and unpublished APIs fail"
     regression_json "$json" '.totals.error_crates == 0 and (.crates | any(.name == "gone" and .change == "removed" and .removed > 0)) and (.crates | any(.name == "born" and .change == "added" and .added > 0)) and (.crates | any(.name == "private_lib" and .removed > 0)) and (.skipped_crates | index("tool") != null) and (.crates | all(.name != "tool"))' "crate membership: additions/removals, private libraries and binary skip are explicit"
 
+    # A failed one-sided build must still identify the crate's lifecycle in human output.
+    printf 'pub fn invalid(\n' >"$repo/born/src/lib.rs"
+    head=$(regression_commit "$repo" 'invalid new library')
+    out=$(cd "$repo" && NO_COLOR=1 "$ZC" "$base" "$head" 2>&1)
+    assert_eq "$?" 2 "crate membership: an invalid added library is an analysis error"
+    assert_contains "$out" 'born (crate added)' "crate membership: added build errors retain lifecycle context"
+    out=$(cd "$repo" && NO_COLOR=1 "$ZC" "$head" "$base" 2>&1)
+    assert_eq "$?" 2 "crate membership: an invalid removed library is an analysis error"
+    assert_contains "$out" 'born (crate removed)' "crate membership: removed build errors retain lifecycle context"
+
     # All renderer assertions name actual public API; no bullet order/wording contract.
     before=$'pub type Strategy = u8;\npub struct S;\nimpl Default for S { fn default() -> Self { S } }\npub struct Attr { pub x: u8 }'
     after=$'pub type Strategy = u16;\npub struct S;\nimpl Default for S { fn default() -> Self { S } }\nimpl S { pub fn default(_: usize) -> Self { S } }\nimpl From<u8> for S { fn from(_: u8) -> Self { S } }\nimpl From<u16> for S { fn from(_: u16) -> Self { S } }\n#[non_exhaustive] pub struct Attr { pub x: u8 }\n#[macro_export] macro_rules! one { () => {} }\n#[macro_export] macro_rules! two { () => {} }\n#[no_mangle] #[link_section=".custom"] pub static COUNT: u8 = 0;\npub extern "C" fn exported() {}'
