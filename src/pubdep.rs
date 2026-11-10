@@ -186,14 +186,16 @@ fn foreign_crates(root: &Value) -> Result<HashSet<String>, String> {
             }
             Value::Object(values) => {
                 if let Some(item_id) = values.get("id").and_then(crate::rustdoc::id_text) {
-                    let crate_id = index
-                        .get(&item_id)
-                        .or_else(|| paths.get(&item_id))
-                        .and_then(|item| item["crate_id"].as_u64())
-                        .ok_or_else(|| {
+                    // An item from a dependency always has a `paths` entry. rustdoc drops
+                    // private and hidden local items from both maps, for example the
+                    // `InternalBitFlags` struct that `bitflags!` names in a public impl, so
+                    // an id found in neither is local and adds no dependency.
+                    if let Some(entry) = index.get(&item_id).or_else(|| paths.get(&item_id)) {
+                        let crate_id = entry["crate_id"].as_u64().ok_or_else(|| {
                             format!("rustdoc JSON has no provenance for item {item_id}")
                         })?;
-                    crates.insert(crate_id);
+                        crates.insert(crate_id);
+                    }
                 }
                 for value in values.values() {
                     references(value, index, paths, crates)?;
