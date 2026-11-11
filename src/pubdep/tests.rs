@@ -748,9 +748,50 @@ fn malformed_provenance_is_an_error_not_an_empty_finding_set() {
     )
     .is_err());
     let mut root = rustdoc(vec![function(50)]);
+    root["paths"]["50"] = json!({"path": ["custom_library", "Type"]});
     assert!(foreign_crates(&root).is_err());
     root["paths"]["50"] = json!({"crate_id": 9});
     assert!(foreign_crates(&root).is_err());
+}
+
+#[test]
+fn ids_that_rustdoc_stripped_from_the_json_are_local_not_malformed() {
+    let root = rustdoc(vec![function(50)]);
+    assert!(foreign_crates(&root).unwrap().is_empty());
+}
+
+#[test]
+fn bitflags_internal_type_does_not_hide_the_foreign_trait_provenance() {
+    // `bitflags!` emits `impl PublicFlags for Flags { type Internal = InternalBitFlags; }`.
+    // The struct is private, so rustdoc leaves it out of `index` and `paths`.
+    let mut root = rustdoc(vec![json!({
+        "id": 1, "crate_id": 0, "name": "Flags", "visibility": "public",
+        "inner": {"struct": {"kind": "unit", "impls": [2]}}
+    })]);
+    root["index"]["2"] = json!({
+        "id": 2, "crate_id": 0, "name": null, "visibility": "default",
+        "inner": {"impl": {
+            "trait": {"path": "PublicFlags", "id": 50},
+            "for": {"resolved_path": {"path": "Flags", "id": 1}},
+            "items": [3], "is_negative": false,
+            "generics": {"params": [], "where_predicates": []}
+        }}
+    });
+    root["index"]["3"] = json!({
+        "id": 3, "crate_id": 0, "name": "Internal", "visibility": "default",
+        "inner": {"assoc_type": {
+            "generics": {"params": [], "where_predicates": []}, "bounds": [],
+            "type": {"resolved_path": {"path": "InternalBitFlags", "id": 99}}
+        }}
+    });
+    root["paths"]["1"] = json!({"crate_id": 0, "path": ["demo", "Flags"], "kind": "struct"});
+    root["paths"]["50"] = json!({
+        "crate_id": 1, "path": ["custom_library", "PublicFlags"], "kind": "trait"
+    });
+    assert_eq!(
+        foreign_crates(&root).unwrap(),
+        HashSet::from(["custom_library".into()])
+    );
 }
 
 #[test]
