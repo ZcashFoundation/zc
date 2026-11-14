@@ -184,3 +184,42 @@ fn invalid_rustdoc_cache_entries_are_not_reused() {
     .unwrap();
     assert!(valid_cached_json(&path));
 }
+
+#[test]
+fn deep_rustdoc_cache_keeps_reachable_public_items() {
+    let tmp = RunTmp::new().unwrap();
+    let path = tmp.dir.join("deep.api.json");
+    let mut ty = json!({"primitive": "u8"});
+    for _ in 0..80 {
+        ty = serde_json::Value::Object(serde_json::Map::from_iter([(
+            "tuple".to_owned(),
+            serde_json::Value::Array(vec![ty]),
+        )]));
+    }
+    let mut fixture = json!({
+        "format_version": 61,
+        "root": 0,
+        "index": {
+            "0": {
+                "id": 0, "crate_id": 0, "name": "sample", "visibility": "public",
+                "inner": {"module": {"items": [1]}}
+            },
+            "1": {
+                "id": 1, "crate_id": 0, "name": "Deep", "visibility": "public",
+                "inner": {"type_alias": {
+                    "type": null,
+                    "generics": {"params": [], "where_predicates": []}
+                }}
+            }
+        },
+        "paths": {},
+        "external_crates": {}
+    });
+    fixture["index"]["1"]["inner"]["type_alias"]["type"] = ty;
+    let encoded = serde_json::to_vec(&fixture).unwrap();
+    fs::write(&path, &encoded).unwrap();
+
+    assert!(valid_cached_json(&path), "deep compiler JSON must remain reusable");
+    let root = crate::rustdoc::parse_json(std::str::from_utf8(&encoded).unwrap()).unwrap();
+    assert!(crate::rustdoc::public_items(&root).items.contains_key("sample::Deep"));
+}
