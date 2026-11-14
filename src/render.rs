@@ -392,8 +392,8 @@ fn type_kinds(
     };
     let path = crate::api::rustdoc_json(ctx, &result.name, worktree, target, sha)?;
     let bytes = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let root =
-        serde_json::from_slice(&bytes).map_err(|error| format!("invalid rustdoc JSON: {error}"))?;
+    let root = crate::rustdoc::decode_json(&bytes)
+        .map_err(|error| format!("invalid rustdoc JSON: {error}"))?;
     Ok(crate::rustdoc::public_items(&root)
         .items
         .into_iter()

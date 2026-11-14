@@ -219,7 +219,12 @@ fn deep_rustdoc_cache_keeps_reachable_public_items() {
     let encoded = serde_json::to_vec(&fixture).unwrap();
     fs::write(&path, &encoded).unwrap();
 
-    assert!(valid_cached_json(&path), "deep compiler JSON must remain reusable");
+    assert!(
+        valid_cached_json(&path),
+        "deep compiler JSON must remain reusable"
+    );
     let root = crate::rustdoc::parse_json(std::str::from_utf8(&encoded).unwrap()).unwrap();
-    assert!(crate::rustdoc::public_items(&root).items.contains_key("sample::Deep"));
+    assert!(crate::rustdoc::public_items(&root)
+        .items
+        .contains_key("sample::Deep"));
 }

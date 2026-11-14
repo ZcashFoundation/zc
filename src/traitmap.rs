@@ -608,7 +608,7 @@ impl Names<'_> {
 }
 
 fn extract(json: &str) -> Vec<(String, String, String)> {
-    let Ok(root) = serde_json::from_str::<Value>(json) else {
+    let Ok(root) = crate::rustdoc::decode_json(json.as_bytes()) else {
         return Vec::new();
     };
     let Some(index) = root.get("index").and_then(Value::as_object) else {

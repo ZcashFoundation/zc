@@ -2,12 +2,22 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use serde::Deserialize;
 use serde_json::Value;
+
+/// Decodes compiler type trees with stack growth rather than serde's default depth limit.
+pub(crate) fn decode_json(bytes: &[u8]) -> Result<Value, serde_json::Error> {
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    decoder.disable_recursion_limit();
+    let value = Value::deserialize(serde_stacker::Deserializer::new(&mut decoder))?;
+    decoder.end()?;
+    Ok(value)
+}
 
 /// Parses a rustdoc crate, rejecting unrelated JSON rather than reporting an empty API.
 pub fn parse_json(json: &str) -> Result<Value, String> {
-    let root: Value =
-        serde_json::from_str(json).map_err(|err| format!("invalid rustdoc JSON: {err}"))?;
+    let root =
+        decode_json(json.as_bytes()).map_err(|err| format!("invalid rustdoc JSON: {err}"))?;
     let root_id = root.get("root").and_then(id_text);
     let module = root_id
         .as_deref()

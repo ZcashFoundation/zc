@@ -194,7 +194,7 @@ fn valid_cached_json(path: &Path) -> bool {
         return false;
     }
 
-    serde_json::from_str::<Value>(&contents).is_ok_and(|json| {
+    crate::rustdoc::decode_json(contents.as_bytes()).is_ok_and(|json| {
         let root = match &json["root"] {
             Value::String(id) => &json["index"][id.as_str()],
             Value::Number(id) => &json["index"][id.to_string()],

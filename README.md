@@ -46,6 +46,9 @@ manual index flags, and preserve unmaterialized sparse paths. No Git commit iden
 Only the comparison's temporary worktrees are removed on exit; unrelated registrations stay intact.
 One effective Cargo build target is supported per run; multi-target arrays fail explicitly.
 
+Deeply nested Rustdoc type trees retain their public API; malformed JSON and invalid root
+modules still fail analysis.
+
 The verdict is not a proof of compatibility. Behavioral changes, unsupported Rust
 patterns, and targets or features outside the selected build still need review.
 
