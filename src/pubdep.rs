@@ -115,7 +115,8 @@ pub fn compute_from_json(
 fn read_foreign_crates(path: &Path) -> Result<HashSet<String>, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("cannot read public dependency rustdoc JSON: {error}"))?;
-    foreign_crates(&crate::rustdoc::parse_json(&contents)?)
+    let root = crate::rustdoc::parse_json(&contents)?;
+    foreign_crates(&root)
 }
 
 fn dependency_metadata(ctx: &Ctx, crate_name: &str, baseline: bool) -> Result<Value, String> {
@@ -172,39 +173,6 @@ fn foreign_crates(root: &Value) -> Result<HashSet<String>, String> {
         .get(&root_id)
         .and_then(|item| item["crate_id"].as_u64())
         .ok_or("rustdoc JSON has no root crate ID")?;
-    fn references(
-        value: &Value,
-        index: &serde_json::Map<String, Value>,
-        paths: &serde_json::Map<String, Value>,
-        crates: &mut HashSet<u64>,
-    ) -> Result<(), String> {
-        match value {
-            Value::Array(values) => {
-                for value in values {
-                    references(value, index, paths, crates)?;
-                }
-            }
-            Value::Object(values) => {
-                if let Some(item_id) = values.get("id").and_then(crate::rustdoc::id_text) {
-                    // An item from a dependency always has a `paths` entry. rustdoc drops
-                    // private and hidden local items from both maps, for example the
-                    // `InternalBitFlags` struct that `bitflags!` names in a public impl, so
-                    // an id found in neither is local and adds no dependency.
-                    if let Some(entry) = index.get(&item_id).or_else(|| paths.get(&item_id)) {
-                        let crate_id = entry["crate_id"].as_u64().ok_or_else(|| {
-                            format!("rustdoc JSON has no provenance for item {item_id}")
-                        })?;
-                        crates.insert(crate_id);
-                    }
-                }
-                for value in values.values() {
-                    references(value, index, paths, crates)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
     let mut crates = HashSet::new();
     let public = crate::rustdoc::public_items(root).items;
     if public.is_empty() {
@@ -215,7 +183,18 @@ fn foreign_crates(root: &Value) -> Result<HashSet<String>, String> {
             crates.insert(crate_id);
         }
         // Documentation links and arbitrary text are not public type provenance.
-        references(&item["inner"], index, paths, &mut crates)?;
+        for value in crate::rustdoc::descendants(&item["inner"]) {
+            if let Some(item_id) = value.get("id").and_then(crate::rustdoc::id_text) {
+                // Dependencies always have a paths entry; stripped private local items may
+                // be absent from both maps and do not add foreign provenance.
+                if let Some(entry) = index.get(&item_id).or_else(|| paths.get(&item_id)) {
+                    let crate_id = entry["crate_id"].as_u64().ok_or_else(|| {
+                        format!("rustdoc JSON has no provenance for item {item_id}")
+                    })?;
+                    crates.insert(crate_id);
+                }
+            }
+        }
     }
     crates.remove(&local);
     crates

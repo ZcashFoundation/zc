@@ -63,7 +63,8 @@ pub fn dump(ctx: &Ctx, ref_sha: &str, crates: &[String]) -> HashMap<String, Trai
 }
 
 fn id_key(id: &Value) -> String {
-    id.as_str().map_or_else(|| id.to_string(), str::to_string)
+    id.as_str()
+        .map_or_else(|| crate::rustdoc::json_text(id), str::to_string)
 }
 
 /// Renders a rustdoc path with its complete generic arguments.
@@ -332,6 +333,10 @@ impl Names<'_> {
     }
 
     fn args(&self, args: &Value) -> Option<String> {
+        stacker::maybe_grow(64 * 1024, 1024 * 1024, || self.args_inner(args))
+    }
+
+    fn args_inner(&self, args: &Value) -> Option<String> {
         if let Some(args) = args.get("angle_bracketed") {
             let mut rendered = Vec::new();
             for arg in args.get("args")?.as_array()? {
@@ -466,6 +471,10 @@ impl Names<'_> {
     }
 
     fn ty(&self, ty: &Value) -> Option<String> {
+        stacker::maybe_grow(64 * 1024, 1024 * 1024, || self.ty_inner(ty))
+    }
+
+    fn ty_inner(&self, ty: &Value) -> Option<String> {
         if let Some(path) = ty.get("resolved_path") {
             return self.path(path);
         }

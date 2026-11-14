@@ -103,6 +103,48 @@ fn ignores_documentation_on_wholly_new_or_removed_items() {
 }
 
 #[test]
+fn deep_constant_types_preserve_complete_value_changes() {
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            let depth = 512;
+            let ty = format!(
+                "{}{}{}",
+                r#"{"tuple":["#.repeat(depth),
+                r#"{"primitive":"u8"}"#,
+                "]}".repeat(depth)
+            );
+            let old_value = format!("{}2{}", "(".repeat(depth), ",)".repeat(depth));
+            let new_value = format!("{}20{}", "(".repeat(depth), ",)".repeat(depth));
+            let mut base = fixture();
+            base["index"]["12"]["inner"]["constant"]["type"] = json!("DEEP_TYPE");
+            base["index"]["12"]["inner"]["constant"]["const"]["value"] = json!(old_value);
+            let mut head = base.clone();
+            head["index"]["12"]["inner"]["constant"]["const"]["value"] = json!(new_value);
+            let (values, docs) = compare(
+                &extract(
+                    &base.to_string().replace(r#""DEEP_TYPE""#, &ty),
+                    "demo-package",
+                )
+                .unwrap(),
+                &extract(
+                    &head.to_string().replace(r#""DEEP_TYPE""#, &ty),
+                    "demo-package",
+                )
+                .unwrap(),
+            );
+            assert!(docs.is_empty());
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0].path, "demo::GLOBAL");
+            assert_eq!(values[0].ty, ty);
+            assert_eq!((&values[0].old, &values[0].new), (&old_value, &new_value));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn adding_and_removing_overrides_compares_inherited_values_at_full_impl_paths() {
     let mut base = fixture();
     base["index"]["4"]["inner"]["trait"]["items"] = json!([5, 20]);

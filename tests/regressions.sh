@@ -392,6 +392,25 @@ EOF
     assert_eq "$(cat "$repo/Cargo.lock")" "$lock_before" "lock isolation: caller lockfile bytes preserved"
     assert_repo_unchanged "$repo" "$before_head" "$before_status" "$before_branch" "$before_worktrees" "lock isolation"
 
+    # Exercise the real cargo-public-api decoder and renderer under a bounded soft stack.
+    local deep_old=u8 deep_new=u16 depth
+    for ((depth = 0; depth < 512; depth++)); do
+        deep_old="*const $deep_old"
+        deep_new="*const $deep_new"
+    done
+    printf -v before '#![recursion_limit = "4096"]\npub trait Marker { fn mark(&self); }\npub fn deep_api(_value: %s) {}\n' "$deep_old"
+    printf -v after '#![recursion_limit = "4096"]\npub trait Marker { fn mark(&self); }\nimpl Marker for %s { fn mark(&self) {} }\npub fn deep_api(_value: %s) {}\n' "$deep_old" "$deep_new"
+    repo=$(new_repo "$before")
+    base=$(git -C "$repo" rev-parse HEAD)
+    head=$(commit_lib "$repo" "$after" 'change deep public signature and add its impl')
+    mkdir -p "$audit_root/deep signatures"
+    out=$(cd "$repo" && unset RUST_MIN_STACK && ulimit -S -s 1024 && TMPDIR="$audit_root/deep signatures" NO_COLOR=1 "$ZC" --flat --with-values --report "$audit_root/deep.json" "$base" "$head" 2>"$audit_root/deep.log")
+    assert_eq "$?" 1 "deep Rustdoc CLI: a real signature change remains breaking"
+    regression_json "$(cat "$audit_root/deep.json")" '.verdict == "breaking" and .totals.error_crates == 0 and .totals.api_breaking > 0 and (.crates | any(.name == "zc_fixture" and .status == "ok" and .changed > 0))' "deep Rustdoc CLI: actual external API diff completes"
+    assert_contains "$out" "$deep_old" "deep Rustdoc CLI: complete baseline type retained"
+    assert_contains "$out" "$deep_new" "deep Rustdoc CLI: complete head type retained"
+    assert_contains "$out" "impl zc_fixture::Marker for $deep_old" "deep Rustdoc CLI: complete reachable impl identity retained"
+
     # Additive textual diffs can still invalidate real downstream Rust programs.
     before=$'pub enum State { One }\npub struct Record { pub x: u8 }\npub trait Required { fn old(&self); }'
     after=$'pub enum State { One, Two }\npub struct Record { pub x: u8, pub y: u8 }\npub trait Required { fn old(&self); fn added(&self); }'

@@ -2,20 +2,134 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Decodes compiler type trees with stack growth rather than serde's default depth limit.
-pub(crate) fn decode_json(bytes: &[u8]) -> Result<Value, serde_json::Error> {
+/// Owns compiler JSON with non-recursive destruction, including partially decoded containers.
+pub(crate) struct Document(Value);
+
+impl Document {
+    fn into_value(mut self) -> Value {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl std::ops::Deref for Document {
+    type Target = Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Document {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Document").finish_non_exhaustive()
+    }
+}
+
+impl Drop for Document {
+    fn drop(&mut self) {
+        let mut pending = match std::mem::take(&mut self.0) {
+            Value::Array(values) => values,
+            Value::Object(values) => values.into_iter().map(|(_, value)| value).collect(),
+            _ => return,
+        };
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Array(values) if pending.is_empty() => pending = values,
+                Value::Array(mut values) => pending.append(&mut values),
+                Value::Object(values) => pending.extend(values.into_iter().map(|(_, value)| value)),
+                _ => {}
+            }
+        }
+    }
+}
+
+struct DocumentVisitor;
+
+impl<'de> serde::de::Visitor<'de> for DocumentVisitor {
+    type Value = Document;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_unit<E>(self) -> Result<Document, E> {
+        Ok(Document(Value::Null))
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Document, E> {
+        Ok(Document(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Document, E> {
+        Ok(Document(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Document, E> {
+        Ok(Document(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Document, E> {
+        serde_json::Number::from_f64(value)
+            .map(|value| Document(Value::Number(value)))
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Document, E> {
+        Ok(Document(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Document, E> {
+        Ok(Document(Value::String(value)))
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut sequence: A,
+    ) -> Result<Document, A::Error> {
+        let mut document = Document(Value::Array(Vec::new()));
+        let Value::Array(values) = &mut document.0 else {
+            unreachable!("the document was constructed as an array")
+        };
+        while let Some(value) = sequence.next_element::<Document>()? {
+            values.push(value.into_value());
+        }
+        Ok(document)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Document, A::Error> {
+        let mut document = Document(Value::Object(serde_json::Map::new()));
+        let Value::Object(values) = &mut document.0 else {
+            unreachable!("the document was constructed as an object")
+        };
+        while let Some((key, value)) = map.next_entry::<String, Document>()? {
+            if let Some(previous) = values.insert(key, value.into_value()) {
+                drop(Document(previous));
+            }
+        }
+        Ok(document)
+    }
+}
+
+impl<'de> Deserialize<'de> for Document {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        decoder.deserialize_any(DocumentVisitor)
+    }
+}
+
+/// Decodes compiler type trees with stack growth and stack-safe ownership on every exit.
+pub(crate) fn decode_json(bytes: &[u8]) -> Result<Document, serde_json::Error> {
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     decoder.disable_recursion_limit();
-    let value = Value::deserialize(serde_stacker::Deserializer::new(&mut decoder))?;
+    let document = Document::deserialize(serde_stacker::Deserializer::new(&mut decoder))?;
     decoder.end()?;
-    Ok(value)
+    Ok(document)
 }
 
 /// Parses a rustdoc crate, rejecting unrelated JSON rather than reporting an empty API.
-pub fn parse_json(json: &str) -> Result<Value, String> {
+pub(crate) fn parse_json(json: &str) -> Result<Document, String> {
     let root =
         decode_json(json.as_bytes()).map_err(|err| format!("invalid rustdoc JSON: {err}"))?;
     let root_id = root.get("root").and_then(id_text);
@@ -32,6 +146,31 @@ pub fn parse_json(json: &str) -> Result<Value, String> {
         return Err("invalid rustdoc JSON: missing root module/index".to_string());
     }
     Ok(root)
+}
+
+/// Visits a JSON tree without consuming call stack proportional to its depth.
+pub(crate) fn descendants(value: &Value) -> impl Iterator<Item = &Value> {
+    let mut pending = vec![value];
+    std::iter::from_fn(move || {
+        let value = pending.pop()?;
+        match value {
+            Value::Array(values) => pending.extend(values.iter().rev()),
+            Value::Object(values) => pending.extend(values.values().rev()),
+            _ => {}
+        }
+        Some(value)
+    })
+}
+
+/// Preserves the complete JSON representation of deeply nested type trees.
+pub(crate) fn json_text(value: &Value) -> String {
+    let mut bytes = Vec::new();
+    value
+        .serialize(serde_stacker::Serializer::new(
+            &mut serde_json::Serializer::new(&mut bytes),
+        ))
+        .expect("JSON values serialize into memory without I/O errors");
+    String::from_utf8(bytes).expect("JSON serialization emits UTF-8")
 }
 
 pub(crate) fn id_text(id: &Value) -> Option<String> {
@@ -186,26 +325,16 @@ pub(crate) fn public_items_for_comparison<'a>(
 }
 
 fn public_owner(root: &Value, value: &Value, local: &Value, owners: &PublicItems<'_>) -> bool {
-    match value {
-        Value::Array(values) => values
-            .iter()
-            .all(|value| public_owner(root, value, local, owners)),
-        Value::Object(values) => {
-            let visible = values.get("id").and_then(id_text).is_none_or(|id| {
-                root.get("index")
-                    .and_then(|index| index.get(&id))
-                    .or_else(|| root.get("paths")?.get(&id))
-                    .is_none_or(|item| {
-                        item.get("crate_id") != Some(local) || owners.preferred.contains_key(&id)
-                    })
-            });
-            visible
-                && values
-                    .values()
-                    .all(|value| public_owner(root, value, local, owners))
-        }
-        _ => true,
-    }
+    descendants(value).all(|value| {
+        value.get("id").and_then(id_text).is_none_or(|id| {
+            root.get("index")
+                .and_then(|index| index.get(&id))
+                .or_else(|| root.get("paths")?.get(&id))
+                .is_none_or(|item| {
+                    item.get("crate_id") != Some(local) || owners.preferred.contains_key(&id)
+                })
+        })
+    })
 }
 
 fn add_impl<'a>(
@@ -233,7 +362,7 @@ fn add_impl<'a>(
                 implementation
                     .pointer("/for/resolved_path/args")
                     .filter(|args| !args.is_null())
-                    .map(|args| format!("{path}<{args}>"))
+                    .map(|args| format!("{path}<{}>", json_text(args)))
             })
             .unwrap_or_else(|| path.into())
     } else {
@@ -258,7 +387,7 @@ fn add_impl<'a>(
             return;
         }
         crate::traitmap::public_path_names(root, trait_path, owners)
-            .unwrap_or_else(|| vec![format!("{trait_path}")])
+            .unwrap_or_else(|| vec![json_text(trait_path)])
             .into_iter()
             .map(|name| format!("<{owner} as {name}>"))
             .collect()
