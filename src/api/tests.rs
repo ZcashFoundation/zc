@@ -228,3 +228,36 @@ fn deep_rustdoc_cache_keeps_reachable_public_items() {
         .items
         .contains_key("sample::Deep"));
 }
+
+#[test]
+fn deep_rustdoc_cleanup_is_stack_safe_on_all_exits() {
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            let tmp = RunTmp::new().unwrap();
+            let path = tmp.dir.join("cleanup.api.json");
+            let depth = 16_384;
+            let mut nested = String::with_capacity(2 * depth + 1);
+            nested.extend(std::iter::repeat_n('[', depth));
+            nested.push('0');
+            nested.extend(std::iter::repeat_n(']', depth));
+            let prefix = r#"{"format_version":61,"root":0,"index":{"0":{"inner":{"module":{"items":[]}}}},"paths":{},"external_crates":{},"deep":"#;
+            let mut encoded = String::with_capacity(prefix.len() + nested.len() + 32);
+            for (suffix, valid) in [
+                ("}", true),
+                ("} trailing", false),
+                (",\"bad\":}", false),
+                (",\"deep\":null}", true),
+            ] {
+                encoded.clear();
+                encoded.push_str(prefix);
+                encoded.push_str(&nested);
+                encoded.push_str(suffix);
+                fs::write(&path, &encoded).unwrap();
+                assert_eq!(valid_cached_json(&path), valid);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
