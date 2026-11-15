@@ -56,7 +56,7 @@ fn dump_index(
     ctx: &Ctx,
     head: bool,
     crate_count: usize,
-) -> Result<BTreeMap<String, Value>, String> {
+) -> Result<BTreeMap<String, crate::rustdoc::Document>, String> {
     let (crates, worktree, target, sha, label) = if head {
         (
             &ctx.head_crates,
@@ -223,13 +223,13 @@ fn type_text(value: &Value) -> String {
                 .filter(|value| !value.is_null())
                 .map(jq_text)
         })
-        .unwrap_or_else(|| value.to_string())
+        .unwrap_or_else(|| jq_text(value))
 }
 
 fn jq_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
-        _ => value.to_string(),
+        _ => crate::rustdoc::json_text(value),
     }
 }
 

@@ -231,6 +231,91 @@ fn public_traits_expose_foreign_implementation_owners_even_without_methods() {
 }
 
 #[test]
+fn deep_public_signatures_and_impl_owners_keep_breaking_provenance() {
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            let depth = 512;
+            let ty = format!(
+                "{}{}{}",
+                r#"{"resolved_path":{"path":"custom_library::Wrap","id":51,"args":{"angle_bracketed":{"args":[{"type":"#.repeat(depth),
+                r#"{"resolved_path":{"path":"custom_library::S","id":50,"args":null}}"#,
+                r#"}],"constraints":[]}}}}"#.repeat(depth)
+            );
+            let mut root = rustdoc(vec![
+                json!({
+                    "id": 1, "crate_id": 0, "name": "Marker", "visibility": "public",
+                    "inner": {"trait": {
+                        "items": [3], "bounds": [], "implementations": [2],
+                        "generics": {"params": [], "where_predicates": []}
+                    }}
+                }),
+                json!({
+                    "id": 5, "crate_id": 0, "name": "make", "visibility": "public",
+                    "inner": {"function": {"sig": {
+                        "inputs": [], "output": "DEEP_TYPE", "is_c_variadic": false
+                    }}}
+                }),
+            ]);
+            root["index"]["2"] = json!({
+                "id": 2, "crate_id": 0, "name": null, "visibility": "default",
+                "inner": {"impl": {
+                    "trait": {"path": "demo::Marker", "id": 1, "args": null},
+                    "for": "DEEP_TYPE", "items": [4], "is_negative": false,
+                    "generics": {"params": [], "where_predicates": []}
+                }}
+            });
+            for (id, has_body) in [(3, false), (4, true)] {
+                root["index"][id.to_string()] = json!({
+                    "id": id, "crate_id": 0, "name": "make", "visibility": "default",
+                    "inner": {"function": {"has_body": has_body, "sig": {
+                        "inputs": [], "output": "DEEP_TYPE", "is_c_variadic": false
+                    }}}
+                });
+            }
+            for (id, name) in [(50, "S"), (51, "Wrap")] {
+                root["paths"][id.to_string()] = json!({
+                    "crate_id": 1, "path": ["custom_library", name], "kind": "struct"
+                });
+            }
+            let encoded = root.to_string().replace(r#""DEEP_TYPE""#, &ty);
+            let root = crate::rustdoc::parse_json(&encoded).unwrap();
+            let owner = format!(
+                "{}custom_library::S{}",
+                "custom_library::Wrap<".repeat(depth),
+                ">".repeat(depth)
+            );
+            let header = format!("<{owner} as demo::Marker>");
+            let public = crate::rustdoc::public_items(&root);
+            assert!(public.items.contains_key("demo::make"));
+            assert!(public.items.contains_key("demo::Marker::make"));
+            assert!(public.items.contains_key(&header));
+            assert!(public.items.contains_key(&format!("{header}::make")));
+            assert_eq!(public.impl_identities[&header].origin, header);
+            let foreign = foreign_crates(&root).unwrap();
+            assert_eq!(foreign, HashSet::from(["custom_library".into()]));
+            let tables = PubdepTables::build(
+                &[row("bar", "0.1", DepKind::Runtime, None)],
+                &[row("bar", "0.2", DepKind::Runtime, None)],
+            );
+            let metadata = metadata("bar", Value::Null, Value::Null);
+            let result = findings(
+                &tables.candidates("demo"),
+                Some((&foreign, &metadata)),
+                (&foreign, &metadata),
+                "demo",
+            )
+            .unwrap();
+            assert_eq!(result.len(), 1);
+            assert!(result[0].is_breaking());
+            assert_eq!((result[0].old.as_str(), result[0].new.as_str()), ("0.1", "0.2"));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn foreign_owner_associated_types_keep_dependency_provenance() {
     let mut root = rustdoc(vec![json!({
         "id": 1, "crate_id": 0, "name": "Project", "visibility": "public",

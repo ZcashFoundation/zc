@@ -326,6 +326,63 @@ fn inaccessible_required_method_token_seals_trait_but_universal_blanket_does_not
 }
 
 #[test]
+fn deep_trait_signatures_and_bounds_preserve_implementability() {
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            let depth = 512;
+            for private in [false, true] {
+                let leaf = if private {
+                    r#"{"resolved_path":{"path":"Token","id":20,"args":null}}"#
+                } else {
+                    r#"{"primitive":"u8"}"#
+                };
+                let ty = format!(
+                    "{}{leaf}{}",
+                    r#"{"tuple":["#.repeat(depth),
+                    "]}".repeat(depth)
+                );
+                let mut base = fixture();
+                base["index"]["20"] = json!({
+                    "id": 20, "crate_id": 0, "name": "Token", "visibility": "public",
+                    "inner": {"struct": {"kind": "unit", "impls": []}}
+                });
+                base["paths"]["90"] = json!({
+                    "crate_id": 1, "path": ["core", "convert", "Into"], "kind": "trait"
+                });
+                base["index"]["7"]["inner"]["trait"]["bounds"] = json!([{
+                    "trait_bound": {"modifier": "none", "generic_params": [], "trait": {
+                        "path": "core::convert::Into", "id": 90,
+                        "args": {"angle_bracketed": {
+                            "args": [{"type": "DEEP_TYPE"}], "constraints": []
+                        }}
+                    }}
+                }]);
+                base["index"]["8"]["inner"]["function"]["sig"] = json!({
+                    "inputs": [], "output": "DEEP_TYPE", "is_c_variadic": false
+                });
+                let mut head = base.clone();
+                head["index"]["7"]["inner"]["trait"]["items"] = json!([8, 9]);
+                let base =
+                    crate::rustdoc::parse_json(&base.to_string().replace(r#""DEEP_TYPE""#, &ty))
+                        .unwrap();
+                let head =
+                    crate::rustdoc::parse_json(&head.to_string().replace(r#""DEEP_TYPE""#, &ty))
+                        .unwrap();
+                let expected = if private {
+                    vec![]
+                } else {
+                    vec!["demo::Required::required: required trait method added".to_string()]
+                };
+                assert_eq!(compare(&base, &head), expected);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn relaxed_sized_and_publicly_satisfiable_blanket_bounds_do_not_seal() {
     let mut base = fixture();
     base["index"]["20"] = json!({"id": 20, "crate_id": 0, "name": "Sealed",

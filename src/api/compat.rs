@@ -14,7 +14,9 @@ pub fn breaking_additions(base_json: &Path, head_json: &Path) -> Result<Vec<Stri
             .map_err(|err| format!("cannot read rustdoc JSON {}: {err}", path.display()))?;
         crate::rustdoc::parse_json(&json).map_err(|err| format!("{}: {err}", path.display()))
     };
-    compare(&read(base_json)?, &read(head_json)?)
+    let base = read(base_json)?;
+    let head = read(head_json)?;
+    compare(&base, &head)
 }
 
 fn compare(base: &Value, head: &Value) -> Result<Vec<String>, String> {
@@ -284,6 +286,17 @@ fn bounds_implementable(
     reachable: &HashSet<String>,
     visiting: &mut HashSet<String>,
 ) -> Result<bool, String> {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        bounds_implementable_inner(root, value, reachable, visiting)
+    })
+}
+
+fn bounds_implementable_inner(
+    root: &Value,
+    value: &Value,
+    reachable: &HashSet<String>,
+    visiting: &mut HashSet<String>,
+) -> Result<bool, String> {
     if let Some(bound) = value.get("trait_bound") {
         // Relaxed bounds do not require the downstream type to implement the trait.
         if bound.get("modifier").and_then(Value::as_str) == Some("maybe") {
@@ -436,16 +449,11 @@ fn simple_blanket_bounds(bounds: &Value) -> bool {
 }
 
 fn private_type(root: &Value, value: &Value, reachable: &HashSet<String>) -> bool {
-    if let Some(id) = value.pointer("/resolved_path/id") {
-        if local(root, id) && id_text(id).is_some_and(|id| !reachable.contains(&id)) {
-            return true;
-        }
-    }
-    match value {
-        Value::Array(values) => values.iter().any(|v| private_type(root, v, reachable)),
-        Value::Object(values) => values.values().any(|v| private_type(root, v, reachable)),
-        _ => false,
-    }
+    crate::rustdoc::descendants(value).any(|value| {
+        value.pointer("/resolved_path/id").is_some_and(|id| {
+            local(root, id) && id_text(id).is_some_and(|id| !reachable.contains(&id))
+        })
+    })
 }
 
 #[cfg(test)]
